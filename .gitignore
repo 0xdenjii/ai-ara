@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+env/
+.env
+
+# Model weights
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Data directories (models, vector DB, graph DB, diaries)
+data/
+
+# AI agent instructions and planning (never commit)
+instructions.md
+final-product.md
+no-commit/
+.research/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+nul
+
+# Logs
+*.log
+logs/
+
+# Lock file (optional — include if you want reproducible builds)
+# uv.lock

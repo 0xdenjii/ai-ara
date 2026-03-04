@@ -1,0 +1,141 @@
+[project]
+name = "ara"
+version = "0.1.0"
+description = "ARA — Privacy-first, local-first, voice-first personal AI assistant"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "0xdenjii", email = "252605176+0xdenjii@users.noreply.github.com" }]
+
+dependencies = [
+    # LLM / Orchestration
+    "llama-index>=0.14.0",
+    "llama-index-llms-ollama>=0.5.0",
+    "llama-index-embeddings-huggingface>=0.5.0",
+    "llama-index-vector-stores-lancedb>=0.4.0",
+    "langgraph>=0.3.0",
+    "langchain-core>=0.3.0",
+    "ollama>=0.4.0",
+
+    # Voice
+    "sounddevice>=0.5.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.19.0",
+    "moonshine-voice>=0.0.49",
+    "kokoro-onnx>=0.5.0",
+    "silero-vad>=6.0.0",
+    "openwakeword>=0.6.0",
+    "soundfile>=0.12.0",
+
+    # Memory
+    "lancedb>=0.17.0",
+    "networkx>=3.4",
+    "spacy>=3.8.0",
+
+    # Embeddings / Reranking
+    "sentence-transformers>=3.3.0",
+
+    # API
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=14.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+
+    # Desktop Automation
+    "pyautogui>=0.9.54",
+    "keyboard>=0.13.5",
+    "psutil>=6.1.0",
+
+    # Internet / Web
+    "playwright>=1.49.0",
+    "httpx>=0.28.0",
+    "beautifulsoup4>=4.12.0",
+    "duckduckgo-search>=7.0.0",
+
+    # Utilities
+    "structlog>=24.4.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+windows = [
+    "pywinauto>=0.6.8",
+]
+fine-tuning = [
+    "unsloth>=2024.12",
+    "transformers>=4.46.0",
+    "datasets>=3.1.0",
+    "peft>=0.13.0",
+    "trl>=0.12.0",
+]
+dev = [
+    "ruff>=0.8.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ara"]
+
+# ── Ruff ─────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "RUF",    # ruff-specific
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented-out code)
+    "TID",    # flake8-tidy-imports
+    "PIE",    # flake8-pie
+    "T20",    # flake8-print
+    "RET",    # flake8-return
+    "C4",     # flake8-comprehensions
+    "PERF",   # perflint
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "RET504", # unnecessary assignment before return
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["T20", "TC001", "I001"]  # print(), inline imports, and import order are fine in CLI scripts
+"src/ara/voice/*.py" = ["TC002"]  # numpy/torch used at runtime, not just for typing
+
+[tool.ruff.lint.isort]
+known-first-party = ["ara"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ── Pytest ───────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring external services",
+    "e2e: marks end-to-end tests",
+]
