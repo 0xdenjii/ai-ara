@@ -210,11 +210,33 @@ class TestAppState:
 
     def test_default_state(self) -> None:
         state = AppState()
+        # Core
         assert state.llm_client is None
         assert state.orchestrator is None
+        # Memory
         assert state.vector_store is None
+        assert state.knowledge_graph is None
+        assert state.conversation_store is None
+        assert state.retrieval_pipeline is None
+        assert state.ingestion_pipeline is None
+        # Agents
+        assert state.intent_router is None
+        assert state.agent_registry is None
+        assert state.context_manager is None
+        # Tools
+        assert state.tool_registry is None
+        assert state.mcp_bridge is None
+        # Pipelines
         assert state.vision_pipeline is None
         assert state.voice_pipeline is None
+        # Proactive
+        assert state.proactive_scheduler is None
+        assert state.notification_queue is None
+        assert state.mood_tracker is None
+        # Obsidian
+        assert state.obsidian_sync is None
+        # Connectivity
+        assert state.connectivity_manager is None
 
     def test_uptime(self) -> None:
         state = AppState()
