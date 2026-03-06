@@ -9,12 +9,14 @@ from ara.utils.types import (
     ChatMessage,
     ConversationEndReason,
     ConversationTurn,
+    EntityType,
     GraphEntity,
     GraphRelation,
     IntentType,
     MemoryChunk,
     MemorySource,
     MessageRole,
+    RelationType,
     RetrievalContext,
     RetrievalResult,
     ToolCall,
@@ -137,20 +139,39 @@ class TestGraphTypes:
         entity = GraphEntity(
             entity_id="e1",
             name="Mom",
-            entity_type="person",
+            entity_type=EntityType.PERSON,
             aliases=["my mother", "mama"],
         )
+        assert entity.entity_type == EntityType.PERSON
         assert entity.entity_type == "person"
         assert len(entity.aliases) == 2
+        assert entity.mention_count == 1
+        assert entity.confidence == 1.0
+
+    def test_graph_entity_all_types(self) -> None:
+        """All 16 entity types are accessible."""
+        assert len(EntityType) == 16
+        for et in EntityType:
+            entity = GraphEntity(entity_id=f"e_{et}", name=f"test_{et}", entity_type=et)
+            assert entity.entity_type == et
 
     def test_graph_relation(self) -> None:
         rel = GraphRelation(
             source_id="e1",
             target_id="e2",
-            relation_type="discussed",
+            relation_type=RelationType.DISCUSSED,
             weight=2.0,
         )
         assert rel.weight == 2.0
+        assert rel.relation_type == RelationType.DISCUSSED
+        assert rel.confidence == 1.0
+
+    def test_graph_relation_all_types(self) -> None:
+        """All 18 relation types are accessible."""
+        assert len(RelationType) == 18
+        for rt in RelationType:
+            rel = GraphRelation(source_id="a", target_id="b", relation_type=rt)
+            assert rel.relation_type == rt
 
 
 class TestToolTypes:

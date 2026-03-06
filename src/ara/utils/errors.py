@@ -402,3 +402,121 @@ class DesktopError(AraError):
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message, component="desktop", operation=operation, details=details)
+
+
+# ── Proactive Feature Errors ────────────────────────────────────────────────
+
+
+class ProactiveError(AraError):
+    """Base error for proactive features (suggestions, recaps, habits, mood, reviews)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "generate",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, component="proactive", operation=operation, details=details)
+
+
+class SuggestionError(ProactiveError):
+    """Failed to generate proactive suggestions."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="suggest", details=details)
+
+
+class RecapError(ProactiveError):
+    """Failed to generate a daily recap."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="recap", details=details)
+
+
+class MoodTrackingError(ProactiveError):
+    """Failed to track or analyze mood trends."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="mood_track", details=details)
+
+
+class ReviewError(ProactiveError):
+    """Failed to generate a memory review."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="review", details=details)
+
+
+class NotificationError(ProactiveError):
+    """Failed to queue or deliver a notification."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="notify", details=details)
+
+
+# ── Obsidian Integration Errors ──────────────────────────────────────────────
+
+
+class ObsidianError(AraError):
+    """Base error for Obsidian vault integration."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "vault_operation",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, component="obsidian", operation=operation, details=details)
+
+
+class ObsidianConnectionError(ObsidianError):
+    """Cannot connect to Obsidian Local REST API."""
+
+    def __init__(self, base_url: str, reason: str) -> None:
+        super().__init__(
+            f"Cannot connect to Obsidian REST API: {reason}",
+            operation="connect",
+            details={"base_url": base_url, "reason": reason},
+        )
+
+
+class ObsidianReadError(ObsidianError):
+    """Failed to read a vault file or directory."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(
+            f"Failed to read vault path '{path}': {reason}",
+            operation="read",
+            details={"path": path, "reason": reason},
+        )
+
+
+class ObsidianWriteError(ObsidianError):
+    """Failed to write or append to a vault file."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(
+            f"Failed to write vault path '{path}': {reason}",
+            operation="write",
+            details={"path": path, "reason": reason},
+        )
+
+
+class ObsidianSyncError(ObsidianError):
+    """Vault sync operation failed."""
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, operation="sync", details=details)
+
+
+class ObsidianParseError(ObsidianError):
+    """Failed to parse an Obsidian note (frontmatter, sections, tasks)."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(
+            f"Failed to parse note '{path}': {reason}",
+            operation="parse",
+            details={"path": path, "reason": reason},
+        )

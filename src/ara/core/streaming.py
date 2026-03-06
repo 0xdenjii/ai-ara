@@ -184,3 +184,117 @@ async def collect_stream(token_stream: AsyncIterator[str]) -> str:
     async for token in token_stream:
         parts.append(token)  # noqa: PERF401
     return "".join(parts)
+
+
+# ── Think Block Filtering ────────────────────────────────────────────────────
+# Qwen3 emits <think>...</think> reasoning blocks by default.
+# These must be filtered from user-visible output.
+
+# Pattern to match complete think blocks (including multi-line)
+_THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+
+
+def filter_think_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks from completed text.
+
+    Args:
+        text: Full text that may contain think blocks.
+
+    Returns:
+        Text with all think blocks removed and leading/trailing whitespace stripped.
+    """
+    return _THINK_BLOCK_PATTERN.sub("", text).strip()
+
+
+@dataclass
+class ThinkBlockFilter:
+    """Streaming filter that strips <think>...</think> blocks token-by-token.
+
+    Tracks whether we're inside a think block and buffers tokens that
+    might be part of opening/closing tags. Only emits tokens that are
+    outside think blocks.
+
+    Usage:
+        tbf = ThinkBlockFilter()
+        async for token in llm_stream:
+            filtered = tbf.process(token)
+            if filtered:
+                print(filtered, end="")
+    """
+
+    _accumulated: str = field(default="", init=False)
+    _in_think: bool = field(default=False, init=False)
+    _emitted_up_to: int = field(default=0, init=False)
+
+    def process(self, token: str) -> str:
+        """Process a single token and return visible text (if any).
+
+        Args:
+            token: A single token from the LLM stream.
+
+        Returns:
+            Text to display (empty string if inside a think block or buffering).
+        """
+        self._accumulated += token
+
+        # If inside a think block, check for closing tag
+        if self._in_think:
+            if "</think>" in self._accumulated:
+                # Remove the complete think block
+                self._accumulated = _THINK_BLOCK_PATTERN.sub("", self._accumulated)
+                self._in_think = False
+                self._emitted_up_to = 0
+                # Return any text that follows the closing tag
+                if self._accumulated:
+                    result = self._accumulated
+                    self._accumulated = ""
+                    return result
+            return ""
+
+        # Check if we're entering a think block
+        if "<think>" in self._accumulated:
+            # Emit everything before the <think> tag
+            idx = self._accumulated.index("<think>")
+            before = self._accumulated[:idx]
+            self._accumulated = self._accumulated[idx:]
+            self._in_think = True
+            self._emitted_up_to = 0
+            return before
+
+        # Check for partial tag at the end (e.g., "<thi" could become "<think>")
+        # Buffer the last few characters that could be a partial tag
+        partial_tag_len = 0
+        for i in range(1, min(len("<think>"), len(self._accumulated) + 1)):
+            if "<think>"[:i] == self._accumulated[-i:]:
+                partial_tag_len = i
+                break
+
+        if partial_tag_len > 0:
+            safe = self._accumulated[self._emitted_up_to : -partial_tag_len]
+            self._emitted_up_to = len(self._accumulated) - partial_tag_len
+            return safe
+
+        # No think block concerns — emit everything new
+        result = self._accumulated[self._emitted_up_to :]
+        self._emitted_up_to = len(self._accumulated)
+        return result
+
+    def flush(self) -> str:
+        """Return any remaining buffered text.
+
+        Call this when the stream ends to get any partial content
+        that was being held back for potential tag matching.
+        """
+        if self._in_think:
+            # Incomplete think block — drop it
+            return ""
+        remaining = self._accumulated[self._emitted_up_to :]
+        self._accumulated = ""
+        self._emitted_up_to = 0
+        return remaining
+
+    def reset(self) -> None:
+        """Reset the filter state."""
+        self._accumulated = ""
+        self._in_think = False
+        self._emitted_up_to = 0

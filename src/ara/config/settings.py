@@ -18,7 +18,9 @@ class LLMSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ARA_")
 
+    backend_type: str = "ollama"  # "ollama" or "llamacpp"
     ollama_base_url: str = "http://localhost:11434"
+    llamacpp_base_url: str = "http://localhost:8080"
     primary_model: str = "qwen3:30b-a3b"
     long_context_model: str = "qwen3:14b"
     draft_model: str = "qwen3:1b"
@@ -26,6 +28,25 @@ class LLMSettings(BaseSettings):
     long_context_length: int = 131072
     temperature: float = 0.8
     max_response_tokens: int = 2048
+
+    # ── Speculative Decoding (llama.cpp server only) ─────────────────────
+    # These settings configure llama-server's speculative decoding feature.
+    # The draft model generates candidate tokens that the primary model
+    # verifies in parallel, typically achieving 1.5-2.5x speedup.
+    speculative_enabled: bool = False
+    speculative_draft_max: int = 16  # Max draft tokens per speculation step
+    speculative_draft_min: int = 5  # Min draft tokens to trigger speculation
+    speculative_draft_p_min: float = 0.9  # Min probability for draft acceptance
+    speculative_n_gpu_layers_draft: int = -1  # GPU layers for draft model (-1 = all)
+
+    # ── llama.cpp Server Options ─────────────────────────────────────────
+    llamacpp_n_gpu_layers: int = -1  # GPU layers for primary model (-1 = all)
+    llamacpp_flash_attn: bool = True  # Enable flash attention (recommended for RTX 4090)
+    llamacpp_context_size: int = 32768  # KV cache context size
+    llamacpp_batch_size: int = 2048  # Batch size for prompt processing
+    llamacpp_threads: int = 0  # CPU threads (0 = auto-detect)
+    llamacpp_host: str = "127.0.0.1"
+    llamacpp_port: int = 8080
 
 
 class AudioSettings(BaseSettings):
@@ -143,6 +164,13 @@ class PersonalitySettings(BaseSettings):
     auto_dial_down_on_distress: bool = True
     distress_dial_reduction: int = Field(default=2, ge=0, le=5)
 
+    # User preference fields for dynamic prompt personalization
+    user_name: str = ""
+    preferred_response_length: Literal["concise", "normal", "detailed"] = "normal"
+    topics_to_avoid: list[str] = Field(default_factory=list)
+    preferred_languages: list[str] = Field(default_factory=lambda: ["english"])
+    user_traits: list[str] = Field(default_factory=list)
+
 
 class APISettings(BaseSettings):
     """FastAPI server configuration."""
@@ -161,6 +189,94 @@ class DesktopSettings(BaseSettings):
 
     enabled: bool = True
     require_confirmation: bool = True
+    command_timeout_seconds: float = 30.0
+    max_file_read_bytes: int = 100_000
+    screenshot_dir: str = "screenshots"
+    audit_db_name: str = "tool_audit.sqlite"
+
+
+class ProactiveSettings(BaseSettings):
+    """Proactive features configuration — suggestions, recaps, habits, mood, reviews."""
+
+    model_config = SettingsConfigDict(env_prefix="ARA_PROACTIVE_")
+
+    enabled: bool = True
+
+    # Idle-state suggestions (P12-01)
+    idle_check_interval_s: int = 300  # check every 5 minutes
+    idle_threshold_s: int = 600  # user idle for 10 min before suggesting
+    max_suggestions_per_hour: int = 3
+
+    # Daily recap (P12-02)
+    daily_recap_enabled: bool = True
+    daily_recap_hour: int = Field(default=22, ge=0, le=23)  # 10 PM
+    daily_recap_minute: int = Field(default=0, ge=0, le=59)
+    min_interactions_for_recap: int = 3  # skip recap on quiet days
+
+    # Habit detection (P12-03)
+    habit_detection_enabled: bool = True
+    habit_min_occurrences: int = 3  # entity seen N times → potential habit
+    habit_lookback_days: int = 30  # analyze last N days for patterns
+
+    # Mood tracking (P12-04)
+    mood_tracking_enabled: bool = True
+    mood_window_days: int = 7  # rolling sentiment window
+
+    # Memory reviews (P12-05)
+    weekly_review_enabled: bool = True
+    weekly_review_day: Literal[
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+    ] = "sunday"
+    weekly_review_hour: int = Field(default=20, ge=0, le=23)  # 8 PM
+    monthly_review_enabled: bool = True
+    monthly_review_day: int = Field(default=1, ge=1, le=28)  # 1st of each month
+
+    # Notification queue (P12-06)
+    notification_queue_max: int = 20
+    notification_ttl_hours: int = 24  # expire stale notifications
+    notification_cooldown_s: int = 120  # min gap between delivered notifications
+
+
+class ObsidianSettings(BaseSettings):
+    """Obsidian vault integration configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="ARA_OBSIDIAN_")
+
+    enabled: bool = True
+    api_url: str = "https://127.0.0.1:27124"
+    api_key: str = ""  # Obsidian Local REST API key (from .env)
+    verify_ssl: bool = False  # Local REST API uses self-signed cert
+
+    # ── Vault structure ──────────────────────────────────────────────────
+    daily_note_folder: str = "10_Journal/Daily"  # Relative to vault root
+    daily_note_pattern: str = "{year}/{mm}-{month}/{date}.md"  # YYYY/MM-Month/YYYY-MM-DD.md
+    inbox_path: str = "00_Inbox/RAM.md"  # Active todos / scratch pad
+    efforts_folder: str = "20_Efforts"  # Projects folder
+
+    # ── Sync engine ──────────────────────────────────────────────────────
+    sync_interval_s: int = 300  # Check for vault changes every 5 minutes
+    sync_on_boot: bool = True  # Full sync at ARA startup
+    sync_lookback_days: int = 7  # How many days back to check for changes
+
+    # ── Writer ───────────────────────────────────────────────────────────
+    write_to_ara_log: bool = True  # Write to dedicated ## ARA's LOG section
+    write_to_ops_log: bool = True  # Also write key items into Q callouts
+    ara_log_heading: str = "## ARA's LOG"  # Section heading in daily note
+    voice: Literal["first_person", "third_person", "factual"] = "first_person"
+
+    # ── Morning briefing ─────────────────────────────────────────────────
+    morning_briefing_enabled: bool = True
+    morning_briefing_hour: int = Field(default=7, ge=0, le=23)
+    end_of_day_recap_enabled: bool = True
+    end_of_day_recap_hour: int = Field(default=23, ge=0, le=23)
+
+    # ── Habit tracking ───────────────────────────────────────────────────
+    protocol_tracking_enabled: bool = True
+    protocol_streak_threshold_pct: float = 80.0  # Score above this = streak maintained
+
+    # ── RAG ingestion ────────────────────────────────────────────────────
+    ingest_on_sync: bool = True  # Auto-ingest changed notes into vector store
+    ingest_batch_size: int = 10  # Notes per batch for ingestion
 
 
 class AraSettings(BaseSettings):
@@ -201,6 +317,8 @@ class AraSettings(BaseSettings):
     personality: PersonalitySettings = Field(default_factory=PersonalitySettings)
     api: APISettings = Field(default_factory=APISettings)
     desktop: DesktopSettings = Field(default_factory=DesktopSettings)
+    proactive: ProactiveSettings = Field(default_factory=ProactiveSettings)
+    obsidian: ObsidianSettings = Field(default_factory=ObsidianSettings)
 
     @field_validator("data_dir", mode="before")
     @classmethod

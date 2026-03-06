@@ -16,7 +16,6 @@ dependencies = [
     "langgraph>=0.3.0",
     "langchain-core>=0.3.0",
     "ollama>=0.4.0",
-
     # Voice
     "sounddevice>=0.5.0",
     "numpy>=1.26.0",
@@ -26,36 +25,31 @@ dependencies = [
     "silero-vad>=6.0.0",
     "openwakeword>=0.6.0",
     "soundfile>=0.12.0",
-
     # Memory
     "lancedb>=0.17.0",
     "networkx>=3.4",
     "spacy>=3.8.0",
-
     # Embeddings / Reranking
     "sentence-transformers>=3.3.0",
-
     # API
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "websockets>=14.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
-
     # Desktop Automation
     "pyautogui>=0.9.54",
     "keyboard>=0.13.5",
     "psutil>=6.1.0",
-
     # Internet / Web
     "playwright>=1.49.0",
     "httpx>=0.28.0",
     "beautifulsoup4>=4.12.0",
     "duckduckgo-search>=7.0.0",
-
     # Utilities
     "structlog>=24.4.0",
     "rich>=13.9.0",
+    "einops>=0.8.2",
 ]
 
 [project.optional-dependencies]
@@ -117,8 +111,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["T20", "TC001", "I001"]  # print(), inline imports, and import order are fine in CLI scripts
+"scripts/*.py" = ["T20", "TC001", "I001", "E402", "E741"]  # print(), inline imports, import order, late imports, ambiguous vars are fine in CLI scripts
 "src/ara/voice/*.py" = ["TC002"]  # numpy/torch used at runtime, not just for typing
+"src/ara/memory/preprocessor.py" = ["TC003"]  # Path used at runtime for file ops, not just typing
+"tests/unit/test_preprocessor.py" = ["TC003"]  # Path used at runtime in fixtures
+"src/ara/api/**/*.py" = ["B008", "TC001", "TC003"]  # FastAPI Depends() in defaults is canonical; runtime imports needed for DI
 
 [tool.ruff.lint.isort]
 known-first-party = ["ara"]

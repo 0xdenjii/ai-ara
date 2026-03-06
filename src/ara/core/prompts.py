@@ -154,6 +154,36 @@ def build_system_prompt(
             "Use tools when the user's request requires action, not just conversation."
         )
 
+    # 7. User preferences
+    user_prefs: list[str] = []
+    if personality.user_name:
+        user_prefs.append(
+            f"The user's name is {personality.user_name}. Use it naturally — not every message, but enough to feel personal."
+        )
+    if personality.preferred_response_length == "concise":
+        user_prefs.append(
+            "The user prefers concise responses. Keep it short and punchy — no rambling."
+        )
+    elif personality.preferred_response_length == "detailed":
+        user_prefs.append(
+            "The user prefers detailed responses. Elaborate, give context, be thorough."
+        )
+    if personality.topics_to_avoid:
+        avoid_str = ", ".join(personality.topics_to_avoid)
+        user_prefs.append(f"Avoid these topics unless the user brings them up first: {avoid_str}")
+    if personality.preferred_languages and personality.preferred_languages != ["english"]:
+        langs_str = ", ".join(personality.preferred_languages)
+        user_prefs.append(
+            f"The user is comfortable with these languages: {langs_str}. Mix them naturally if appropriate."
+        )
+    if personality.user_traits:
+        traits_str = ", ".join(personality.user_traits)
+        user_prefs.append(
+            f"Key things about the user: {traits_str}. Reference these naturally as a friend who knows them well."
+        )
+    if user_prefs:
+        parts.append("User preferences:\n" + "\n".join(f"- {p}" for p in user_prefs))
+
     return "\n\n".join(parts)
 
 
