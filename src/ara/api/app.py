@@ -157,8 +157,8 @@ async def _init_memory_subsystems(settings: AraSettings, app_state: AppState) ->
         app_state.knowledge_graph = kg
         log.info(
             "knowledge_graph_loaded",
-            nodes=kg.node_count,
-            edges=kg.edge_count,
+            entities=kg.entity_count,
+            relations=kg.relation_count,
         )
     except Exception as exc:
         log.warning("knowledge_graph_load_failed", error=str(exc))
@@ -262,7 +262,7 @@ async def _init_tools(settings: AraSettings, app_state: AppState) -> None:
 
         # Initialize all registered tools
         await registry.connect_all()
-        log.info("tool_registry_ready", total=len(registry))
+        log.info("tool_registry_ready", total=registry.tool_count)
     except Exception as exc:
         log.warning("tools_init_failed", error=str(exc))
 
@@ -358,7 +358,7 @@ async def _init_agents(settings: AraSettings, app_state: AppState) -> None:
         orch = Orchestrator(settings, llm, router, agent_reg, ctx_mgr)
         await orch.connect()
         app_state.orchestrator = orch
-        log.info("orchestrator_ready", agents=len(agent_reg))
+        log.info("orchestrator_ready", agents=agent_reg.agent_count)
     except Exception as exc:
         log.warning("agents_init_failed", error=str(exc))
 
@@ -429,8 +429,8 @@ async def _init_obsidian(settings: AraSettings, app_state: AppState) -> None:
                 sync_state = await sync.boot_sync()
                 log.info(
                     "obsidian_boot_sync_done",
-                    synced=sync_state.synced_count,
-                    errors=sync_state.error_count,
+                    synced=sync_state.notes_synced,
+                    errors=len(sync_state.errors),
                 )
             except Exception as exc:
                 log.warning("obsidian_boot_sync_failed", error=str(exc))
