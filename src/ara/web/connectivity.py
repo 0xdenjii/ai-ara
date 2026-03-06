@@ -57,14 +57,10 @@ _CHECK_HOSTS = [
     ("208.67.222.222", 53),  # OpenDNS
 ]
 
-# Timeout for individual connectivity checks (seconds)
-_CHECK_TIMEOUT_S = 3.0
-
-# Minimum interval between network checks to avoid spamming (seconds)
-_MIN_CHECK_INTERVAL_S = 10.0
-
-# Background check interval (seconds) — how often to re-check connectivity
-_BACKGROUND_CHECK_INTERVAL_S = 60.0
+# Default values used when ConnectivityManager is constructed without settings
+_DEFAULT_CHECK_TIMEOUT_S = 3.0
+_DEFAULT_MIN_CHECK_INTERVAL_S = 10.0
+_DEFAULT_BACKGROUND_CHECK_INTERVAL_S = 60.0
 
 
 StateChangeCallback = Callable[[ConnectivityState], Awaitable[None] | None]
@@ -83,10 +79,22 @@ class ConnectivityManager:
         self,
         settings: InternetSettings,
         *,
-        check_interval_s: float = _BACKGROUND_CHECK_INTERVAL_S,
+        check_interval_s: float | None = None,
     ) -> None:
         self._settings = settings
-        self._check_interval_s = check_interval_s
+        self._check_interval_s = (
+            check_interval_s
+            if check_interval_s is not None
+            else getattr(
+                settings, "connectivity_background_interval_s", _DEFAULT_BACKGROUND_CHECK_INTERVAL_S
+            )
+        )
+        self._check_timeout_s: float = getattr(
+            settings, "connectivity_check_timeout_s", _DEFAULT_CHECK_TIMEOUT_S
+        )
+        self._min_check_interval_s: float = getattr(
+            settings, "connectivity_check_interval_s", _DEFAULT_MIN_CHECK_INTERVAL_S
+        )
         self._state = ConnectivityState.UNKNOWN
         self._network_available = False
         self._user_enabled = settings.internet_enabled
@@ -188,7 +196,7 @@ class ConnectivityManager:
         now = time.monotonic()
         if (
             now - self._last_check_time
-        ) < _MIN_CHECK_INTERVAL_S and old_state != ConnectivityState.UNKNOWN:
+        ) < self._min_check_interval_s and old_state != ConnectivityState.UNKNOWN:
             return self._state
 
         self._last_check_time = now
@@ -267,7 +275,8 @@ class ConnectivityManager:
         if self._check_fn is not None:
             try:
                 return await self._check_fn()
-            except Exception:
+            except Exception as exc:
+                log.debug("custom_check_fn_failed", error=str(exc))
                 return False
 
         loop = asyncio.get_event_loop()
@@ -276,11 +285,12 @@ class ConnectivityManager:
             try:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, _socket_check, host, port),
-                    timeout=_CHECK_TIMEOUT_S,
+                    timeout=self._check_timeout_s,
                 )
                 if result:
                     return True
-            except (TimeoutError, Exception):
+            except Exception as exc:
+                log.debug("connectivity_check_failed", host=host, port=port, error=str(exc))
                 continue
 
         return False
@@ -334,7 +344,7 @@ def _socket_check(host: str, port: int) -> bool:
         True if connection succeeds.
     """
     try:
-        sock = socket.create_connection((host, port), timeout=_CHECK_TIMEOUT_S)
+        sock = socket.create_connection((host, port), timeout=_DEFAULT_CHECK_TIMEOUT_S)
         sock.close()
         return True
     except (OSError, TimeoutError):

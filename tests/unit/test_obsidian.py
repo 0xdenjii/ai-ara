@@ -1132,20 +1132,26 @@ class TestProtocolTracker:
 
     @pytest.mark.asyncio
     async def test_most_missed_items(self, settings: ObsidianSettings) -> None:
+        from datetime import datetime, timedelta
+
         sync = AsyncMock(spec=ObsidianSync)
         sync.get_daily_note = AsyncMock(return_value=None)
         tracker = ProtocolTracker(settings, sync)
 
+        # Use relative dates so test doesn't break as calendar advances
+        today = datetime.now().date().isoformat()
+        yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
+
         # Add scores with missed items
-        tracker.scores["2026-03-06"] = ProtocolScore(
-            date="2026-03-06",
+        tracker.scores[today] = ProtocolScore(
+            date=today,
             total_items=3,
             completed_items=1,
             score_pct=33.3,
             missed_items=["Read", "Journal"],
         )
-        tracker.scores["2026-03-05"] = ProtocolScore(
-            date="2026-03-05",
+        tracker.scores[yesterday] = ProtocolScore(
+            date=yesterday,
             total_items=3,
             completed_items=2,
             score_pct=66.7,

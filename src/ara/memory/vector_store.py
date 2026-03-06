@@ -11,7 +11,6 @@ All configuration comes from AraSettings.
 
 from __future__ import annotations
 
-import contextlib
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -200,8 +199,10 @@ class VectorStore:
                 # Delete existing chunks with same IDs, then add new ones
                 chunk_ids = [r["chunk_id"] for r in records]
                 id_list = ", ".join(f"'{cid}'" for cid in chunk_ids)
-                with contextlib.suppress(Exception):
+                try:
                     self._table.delete(f"chunk_id IN ({id_list})")
+                except Exception as exc:
+                    log.debug("chunk_delete_before_upsert_failed", error=str(exc))
                 self._table.add(records)
 
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -312,8 +313,10 @@ class VectorStore:
 
         try:
             # Create FTS index if not exists
-            with contextlib.suppress(Exception):
+            try:
                 self._table.create_fts_index("text", replace=True)
+            except Exception as exc:
+                log.debug("fts_index_creation_failed", error=str(exc))
 
             results = self._table.search(query_text, query_type="fts").limit(top_k).to_list()
 

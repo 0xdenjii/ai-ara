@@ -187,7 +187,7 @@ class TestIngestionPipelineIngestFile:
         assert result.chunks_created >= 1
         assert result.chunks_stored >= 1
         assert result.skipped is False
-        assert result.elapsed_ms > 0
+        assert result.elapsed_ms >= 0  # Can be 0.0 on fast machines with mocked embedder
         assert result.file_hash != ""
 
     def test_ingest_with_markdown_headers(self, tmp_path: Path) -> None:

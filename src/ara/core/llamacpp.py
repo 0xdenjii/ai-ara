@@ -42,12 +42,6 @@ if TYPE_CHECKING:
 
 log = get_logger("llamacpp")
 
-# Default timeout for generation requests (5 minutes — large models can be slow)
-_GENERATION_TIMEOUT_S = 300.0
-
-# Timeout for health/connectivity checks (10 seconds)
-_HEALTH_TIMEOUT_S = 10.0
-
 
 class LlamaCppClient:
     """Async client for llama.cpp server's OpenAI-compatible API.
@@ -69,13 +63,17 @@ class LlamaCppClient:
         self._active_model: str = settings.llm.primary_model
         self._connected: bool = False
         self._server_model: str = ""  # Model name reported by the server
+        gen_timeout = settings.llm.llamacpp_generation_timeout_s
+        health_timeout = settings.llm.llamacpp_health_timeout_s
+        self._gen_timeout = gen_timeout
+        self._health_timeout = health_timeout
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=httpx.Timeout(
-                connect=_HEALTH_TIMEOUT_S,
-                read=_GENERATION_TIMEOUT_S,
-                write=_HEALTH_TIMEOUT_S,
-                pool=_HEALTH_TIMEOUT_S,
+                connect=health_timeout,
+                read=gen_timeout,
+                write=health_timeout,
+                pool=health_timeout,
             ),
         )
 
@@ -103,7 +101,7 @@ class LlamaCppClient:
             # Check server health
             health_response = await self._client.get(
                 "/health",
-                timeout=_HEALTH_TIMEOUT_S,
+                timeout=self._health_timeout,
             )
             if health_response.status_code != 200:
                 health_data = health_response.json()
@@ -117,7 +115,7 @@ class LlamaCppClient:
             # Retrieve loaded model info
             models_response = await self._client.get(
                 "/v1/models",
-                timeout=_HEALTH_TIMEOUT_S,
+                timeout=self._health_timeout,
             )
             if models_response.status_code == 200:
                 models_data = models_response.json()
@@ -233,10 +231,10 @@ class LlamaCppClient:
                 "/v1/chat/completions",
                 json=request_body,
                 timeout=httpx.Timeout(
-                    connect=_HEALTH_TIMEOUT_S,
-                    read=_GENERATION_TIMEOUT_S,
-                    write=_HEALTH_TIMEOUT_S,
-                    pool=_HEALTH_TIMEOUT_S,
+                    connect=self._health_timeout,
+                    read=self._gen_timeout,
+                    write=self._health_timeout,
+                    pool=self._health_timeout,
                 ),
             ) as response:
                 if response.status_code != 200:
@@ -318,7 +316,7 @@ class LlamaCppClient:
                 },
             ) from exc
 
-    async def swap_model(self, target_model: str) -> None:
+    async def swap_model(self, target_model: str, *, num_ctx: int | None = None) -> None:
         """Signal a model swap request.
 
         llama.cpp server loads a single model at startup. Swapping models
@@ -330,6 +328,7 @@ class LlamaCppClient:
 
         Args:
             target_model: The model identifier to switch to.
+            num_ctx: Ignored for llama.cpp (context is set at server start).
 
         Raises:
             LLMModelSwapError: Always, since llama.cpp doesn't support runtime swaps.
@@ -350,11 +349,17 @@ class LlamaCppClient:
 
     async def swap_to_primary(self) -> None:
         """Switch to the primary conversation model."""
-        await self.swap_model(self._settings.llm.primary_model)
+        await self.swap_model(
+            self._settings.llm.primary_model,
+            num_ctx=self._settings.llm.primary_model_context_length,
+        )
 
     async def swap_to_long_context(self) -> None:
         """Switch to the long-context model for diary analysis."""
-        await self.swap_model(self._settings.llm.long_context_model)
+        await self.swap_model(
+            self._settings.llm.long_context_model,
+            num_ctx=self._settings.llm.long_context_length,
+        )
 
     async def list_models(self) -> list[dict[str, str | float]]:
         """List the model loaded in the llama.cpp server.
@@ -365,7 +370,7 @@ class LlamaCppClient:
         try:
             response = await self._client.get(
                 "/v1/models",
-                timeout=_HEALTH_TIMEOUT_S,
+                timeout=self._health_timeout,
             )
             if response.status_code != 200:
                 return [
@@ -403,7 +408,7 @@ class LlamaCppClient:
             # llama.cpp /slots endpoint gives info about loaded model slots
             response = await self._client.get(
                 "/health",
-                timeout=_HEALTH_TIMEOUT_S,
+                timeout=self._health_timeout,
             )
             model_name = self._server_model or self._active_model
             if response.status_code == 200:
@@ -491,6 +496,12 @@ def build_server_args(
 
     if llm.llamacpp_flash_attn:
         args.append("--flash-attn")
+
+    # KV cache quantization (reduces VRAM usage for KV cache, q8_0 is ~lossless)
+    if llm.llamacpp_kv_cache_type_k != "f16":
+        args.extend(["--cache-type-k", llm.llamacpp_kv_cache_type_k])
+    if llm.llamacpp_kv_cache_type_v != "f16":
+        args.extend(["--cache-type-v", llm.llamacpp_kv_cache_type_v])
 
     # Speculative decoding
     if llm.speculative_enabled and draft_model_path:

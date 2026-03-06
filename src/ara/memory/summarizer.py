@@ -195,8 +195,12 @@ class Summarizer:
         truncated_text = text[: max_input_tokens * 4]  # Rough char-to-token ratio
         prompt = _SUMMARIZE_PROMPT.format(text=truncated_text)
 
+        # Note: Qwen3.5 controls thinking via API parameters, not inline /no_think.
+        # We keep the prompt clean and rely on low temperature (0.3) to suppress
+        # extended reasoning. The ThinkBlockFilter in streaming.py strips any
+        # <think> blocks that may still appear.
         messages: list[ChatMessage] = [
-            ChatMessage(role=MessageRole.USER, content=prompt + " /no_think"),
+            ChatMessage(role=MessageRole.USER, content=prompt),
         ]
 
         try:

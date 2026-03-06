@@ -29,6 +29,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ara import __version__
 from ara.tools.registry import (
     BaseTool,
     ParameterType,
@@ -41,8 +42,12 @@ from ara.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from ara.config.settings import AraSettings
+    from ara.tools.registry import ToolRegistry
 
 log = get_logger("mcp_bridge")
+
+# MCP protocol version — single source of truth
+_MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
 # ── MCP Server Config ────────────────────────────────────────────────────────
@@ -72,6 +77,28 @@ class MCPServerConfig:
 # ── MCP Connection ───────────────────────────────────────────────────────────
 
 
+def _check_jsonrpc_error(response: dict[str, Any], method: str, server_name: str) -> None:
+    """Check a JSON-RPC response for an error and raise if present.
+
+    Args:
+        response: Parsed JSON-RPC response.
+        method: The RPC method that was called (for error context).
+        server_name: MCP server name (for error context).
+
+    Raises:
+        DesktopError: If the response contains a JSON-RPC error.
+    """
+    error = response.get("error")
+    if error is not None:
+        code = error.get("code", -1) if isinstance(error, dict) else -1
+        message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+        raise DesktopError(
+            f"MCP server '{server_name}' returned JSON-RPC error on '{method}': {message}",
+            operation="mcp_request",
+            details={"server": server_name, "method": method, "code": code},
+        )
+
+
 class MCPConnection:
     """Manages a connection to a single MCP server.
 
@@ -79,10 +106,12 @@ class MCPConnection:
 
     Args:
         config: Server configuration.
+        connect_timeout_s: Timeout for connection and request operations.
     """
 
-    def __init__(self, config: MCPServerConfig) -> None:
+    def __init__(self, config: MCPServerConfig, *, connect_timeout_s: float = 30.0) -> None:
         self._config = config
+        self._connect_timeout_s = connect_timeout_s
         self._process: asyncio.subprocess.Process | None = None
         self._request_id: int = 0
         self._connected: bool = False
@@ -153,9 +182,9 @@ class MCPConnection:
         response = await self._send_request(
             "initialize",
             {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "ara", "version": "0.1.0"},
+                "clientInfo": {"name": "ara", "version": __version__},
             },
         )
 
@@ -186,20 +215,22 @@ class MCPConnection:
             ) from exc
 
         url = self._config.url.rstrip("/")
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        timeout = self._connect_timeout_s
+        async with httpx.AsyncClient(timeout=timeout) as client:
             payload = {
                 "jsonrpc": "2.0",
                 "id": self._next_id(),
                 "method": "initialize",
                 "params": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "ara", "version": "0.1.0"},
+                    "clientInfo": {"name": "ara", "version": __version__},
                 },
             }
             resp = await client.post(f"{url}/mcp", json=payload)
             resp.raise_for_status()
             result = resp.json()
+            _check_jsonrpc_error(result, "initialize", self._config.name)
             self._server_info = result.get("result", {})
 
             # Send initialized notification
@@ -212,7 +243,7 @@ class MCPConnection:
         self._connected = True
 
         # Discover tools via HTTP
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             tools_payload = {
                 "jsonrpc": "2.0",
                 "id": self._next_id(),
@@ -222,6 +253,7 @@ class MCPConnection:
             resp = await client.post(f"{url}/mcp", json=tools_payload)
             resp.raise_for_status()
             result = resp.json()
+            _check_jsonrpc_error(result, "tools/list", self._config.name)
             self._tools = result.get("result", {}).get("tools", [])
 
         log.info(
@@ -280,7 +312,7 @@ class MCPConnection:
         import httpx
 
         url = self._config.url.rstrip("/")
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=self._connect_timeout_s) as client:
             payload = {
                 "jsonrpc": "2.0",
                 "id": self._next_id(),
@@ -290,6 +322,7 @@ class MCPConnection:
             resp = await client.post(f"{url}/mcp", json=payload)
             resp.raise_for_status()
             result = resp.json()
+            _check_jsonrpc_error(result, "tools/call", self._config.name)
 
         content_parts = result.get("result", {}).get("content", [])
         text_parts = [
@@ -347,12 +380,16 @@ class MCPConnection:
 
         # Read response line
         try:
-            line = await asyncio.wait_for(self._process.stdout.readline(), timeout=30.0)
+            line = await asyncio.wait_for(
+                self._process.stdout.readline(),
+                timeout=self._connect_timeout_s,
+            )
         except TimeoutError as exc:
             raise DesktopError(
-                f"MCP server '{self._config.name}' timed out on '{method}'",
+                f"MCP server '{self._config.name}' timed out on '{method}' "
+                f"(timeout={self._connect_timeout_s}s)",
                 operation="mcp_request",
-                details={"method": method},
+                details={"method": method, "timeout_s": self._connect_timeout_s},
             ) from exc
 
         if not line:
@@ -362,7 +399,9 @@ class MCPConnection:
                 details={"method": method},
             )
 
-        return json.loads(line.decode("utf-8"))  # type: ignore[no-any-return]
+        result: dict[str, Any] = json.loads(line.decode("utf-8"))
+        _check_jsonrpc_error(result, method, self._config.name)
+        return result
 
     async def _send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Send a JSON-RPC notification (no response expected).
@@ -497,8 +536,15 @@ class MCPBridge:
 
         Returns:
             List of MCPToolProxy instances for the server's tools.
+
+        Raises:
+            DesktopError: If MCP is disabled in settings.
         """
-        conn = MCPConnection(config)
+        if not self._settings.mcp.enabled:
+            log.info("mcp_disabled", server=config.name)
+            return []
+
+        conn = MCPConnection(config, connect_timeout_s=self._settings.mcp.connect_timeout_s)
         await conn.connect()
         self._connections[config.name] = conn
 
@@ -516,7 +562,10 @@ class MCPBridge:
         return proxies
 
     async def connect_all(self, configs: list[MCPServerConfig]) -> list[MCPToolProxy]:
-        """Connect to multiple MCP servers.
+        """Connect to multiple MCP servers with retry logic.
+
+        Retries each server up to ``settings.mcp.max_retries`` times before
+        giving up. Skips all servers if MCP is disabled globally.
 
         Args:
             configs: List of server configurations.
@@ -524,21 +573,51 @@ class MCPBridge:
         Returns:
             All discovered tool proxies.
         """
+        if not self._settings.mcp.enabled:
+            log.info("mcp_all_disabled")
+            return []
+
+        max_retries = self._settings.mcp.max_retries
         all_proxies: list[MCPToolProxy] = []
+
         for config in configs:
-            try:
-                proxies = await self.connect_server(config)
-                all_proxies.extend(proxies)
-            except DesktopError as exc:
-                log.error(
-                    "mcp_bridge_connect_failed",
+            connected = False
+            for attempt in range(1, max_retries + 2):  # 1 initial + max_retries
+                try:
+                    proxies = await self.connect_server(config)
+                    all_proxies.extend(proxies)
+                    connected = True
+                    break
+                except DesktopError as exc:
+                    if attempt <= max_retries:
+                        log.warning(
+                            "mcp_bridge_connect_retry",
+                            server=config.name,
+                            attempt=attempt,
+                            max_retries=max_retries,
+                            error=str(exc),
+                        )
+                        await asyncio.sleep(min(attempt * 2.0, 10.0))
+                    else:
+                        log.error(
+                            "mcp_bridge_connect_failed",
+                            server=config.name,
+                            attempts=attempt,
+                            error=str(exc),
+                        )
+
+            if not connected:
+                log.warning(
+                    "mcp_bridge_server_skipped",
                     server=config.name,
-                    error=str(exc),
+                    reason="all_retries_exhausted",
                 )
 
         return all_proxies
 
-    def register_tools(self, registry: Any, proxies: list[MCPToolProxy] | None = None) -> list[str]:
+    def register_tools(
+        self, registry: ToolRegistry, proxies: list[MCPToolProxy] | None = None
+    ) -> list[str]:
         """Register MCP tool proxies with a ToolRegistry.
 
         Args:
@@ -564,3 +643,134 @@ class MCPBridge:
                 log.warning("mcp_bridge_close_error", server=name, error=str(exc))
         self._connections.clear()
         self._proxies.clear()
+
+
+# ── MCP Auto-Discovery ───────────────────────────────────────────────────────
+
+
+def discover_mcp_servers() -> list[MCPServerConfig]:
+    """Auto-discover MCP server configurations from system AI agent configs.
+
+    Scans known config locations for Claude Desktop, Antigravity, and other
+    AI tools. Returns a deduplicated list of MCPServerConfig objects.
+
+    Discovered sources:
+        - Claude Desktop: %APPDATA%/Claude/claude_desktop_config.json
+        - Antigravity: %APPDATA%/Antigravity/User/mcp.json
+
+    Returns:
+        List of MCPServerConfig for all discovered servers.
+    """
+    import os
+    from pathlib import Path
+
+    configs: list[MCPServerConfig] = []
+    seen_names: set[str] = set()
+
+    appdata = os.environ.get("APPDATA", "")
+
+    # ── Claude Desktop ───────────────────────────────────────────────────
+    claude_config_path = Path(appdata) / "Claude" / "claude_desktop_config.json"
+    if claude_config_path.exists():
+        try:
+            raw = json.loads(claude_config_path.read_text(encoding="utf-8"))
+            servers = raw.get("mcpServers", {})
+            for name, server_def in servers.items():
+                if name in seen_names:
+                    continue
+                # Skip obsidian — ARA has its own direct REST integration
+                if name == "obsidian":
+                    log.info("mcp_discovery_skip", server=name, reason="ara_has_native_integration")
+                    continue
+                config = _parse_claude_desktop_server(name, server_def)
+                if config is not None:
+                    configs.append(config)
+                    seen_names.add(name)
+            log.info(
+                "mcp_discovery_claude_desktop",
+                path=str(claude_config_path),
+                servers_found=len(servers),
+                servers_added=len([c for c in configs if c.name in seen_names]),
+            )
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("mcp_discovery_claude_desktop_error", error=str(exc))
+
+    # ── Antigravity ──────────────────────────────────────────────────────
+    antigravity_config_path = Path(appdata) / "Antigravity" / "User" / "mcp.json"
+    if antigravity_config_path.exists():
+        try:
+            raw = json.loads(antigravity_config_path.read_text(encoding="utf-8"))
+            servers = raw.get("servers", {})
+            for name, server_def in servers.items():
+                # Antigravity uses opaque names like "my-mcp-server-58771d19"
+                # Derive a human-readable name from the URL if possible
+                readable_name = _derive_server_name(name, server_def)
+                if readable_name in seen_names:
+                    continue
+                config = _parse_antigravity_server(readable_name, server_def)
+                if config is not None:
+                    configs.append(config)
+                    seen_names.add(readable_name)
+            log.info(
+                "mcp_discovery_antigravity",
+                path=str(antigravity_config_path),
+                servers_found=len(servers),
+            )
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("mcp_discovery_antigravity_error", error=str(exc))
+
+    log.info(
+        "mcp_discovery_complete",
+        total_servers=len(configs),
+        server_names=[c.name for c in configs],
+    )
+    return configs
+
+
+def _parse_claude_desktop_server(name: str, server_def: dict[str, Any]) -> MCPServerConfig | None:
+    """Parse a Claude Desktop MCP server definition into MCPServerConfig."""
+    command = server_def.get("command", "")
+    args = server_def.get("args", [])
+    env = server_def.get("env", {})
+
+    if not command:
+        log.warning("mcp_discovery_skip_no_command", server=name)
+        return None
+
+    return MCPServerConfig(
+        name=name,
+        transport="stdio",
+        command=command,
+        args=tuple(str(a) for a in args),
+        env={str(k): str(v) for k, v in env.items()},
+    )
+
+
+def _parse_antigravity_server(name: str, server_def: dict[str, Any]) -> MCPServerConfig | None:
+    """Parse an Antigravity MCP server definition into MCPServerConfig."""
+    transport_type = server_def.get("type", "http")
+    url = server_def.get("url", "")
+    headers = server_def.get("headers", {})
+
+    if transport_type == "http" and url:
+        return MCPServerConfig(
+            name=name,
+            transport="http",
+            url=url,
+            env={str(k): str(v) for k, v in headers.items()},
+        )
+
+    log.warning("mcp_discovery_unsupported_transport", server=name, transport=transport_type)
+    return None
+
+
+def _derive_server_name(opaque_name: str, server_def: dict[str, Any]) -> str:
+    """Derive a human-readable name from a server definition."""
+    url = server_def.get("url", "")
+    # Extract service name from URL (e.g., "https://mcp.context7.com/mcp" -> "context7")
+    if "context7" in url:
+        return "context7"
+    if "figma" in url:
+        return "figma"
+    # Fall back to the opaque name
+    return opaque_name

@@ -43,10 +43,7 @@ if TYPE_CHECKING:
 
 log = get_logger("qwen_vl")
 
-# Ollama API base URL
-_OLLAMA_BASE = "http://localhost:11434"
-
-# Default Ollama model name for Qwen-VL
+# Default Ollama model name for Qwen-VL (overridden by settings.vision.qwen_vl_model)
 _DEFAULT_OLLAMA_MODEL = "qwen2.5-vl:7b"
 
 
@@ -73,7 +70,7 @@ class QwenVLModel:
         self._settings = settings
         self._ollama_model = ollama_model or _DEFAULT_OLLAMA_MODEL
         self._loaded: bool = False
-        self._ollama_base = _OLLAMA_BASE
+        self._ollama_base = settings.llm.ollama_base_url
 
     @property
     def loaded(self) -> bool:

@@ -306,6 +306,9 @@ class ObsidianSync:
     async def ingest_all_cached(self) -> int:
         """Force ingest all cached notes into the vector store.
 
+        Processes notes in batches of ``settings.ingest_batch_size`` to avoid
+        memory pressure with large vaults.
+
         Returns:
             Number of notes successfully ingested.
         """
@@ -313,22 +316,34 @@ class ObsidianSync:
             log.warning("obsidian_ingest_no_pipeline")
             return 0
 
+        batch_size = self._settings.ingest_batch_size
+        sorted_notes = sorted(self.notes_cache.items())
         ingested = 0
-        for _date_str, note in sorted(self.notes_cache.items()):
-            try:
-                result = self._ingestion.ingest_text(
-                    text=note.raw_content,
-                    source_name=f"obsidian:{note.path}",
-                    force=True,
-                )
-                if result.chunks_stored > 0:
-                    ingested += 1
-            except Exception as exc:
-                log.warning(
-                    "obsidian_ingest_error",
-                    path=note.path,
-                    error=str(exc),
-                )
+
+        for batch_start in range(0, len(sorted_notes), batch_size):
+            batch = sorted_notes[batch_start : batch_start + batch_size]
+            for _date_str, note in batch:
+                try:
+                    result = self._ingestion.ingest_text(
+                        text=note.raw_content,
+                        source_name=f"obsidian:{note.path}",
+                        force=True,
+                    )
+                    if result.chunks_stored > 0:
+                        ingested += 1
+                except Exception as exc:
+                    log.warning(
+                        "obsidian_ingest_error",
+                        path=note.path,
+                        error=str(exc),
+                    )
+
+            log.debug(
+                "obsidian_ingest_batch_complete",
+                batch_start=batch_start,
+                batch_size=len(batch),
+                ingested_so_far=ingested,
+            )
 
         log.info("obsidian_ingest_all_complete", ingested=ingested, total=len(self.notes_cache))
         return ingested

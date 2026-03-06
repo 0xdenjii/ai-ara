@@ -338,7 +338,8 @@ class SuggestionEngine:
         # Find entities with high degree centrality (connected to many things)
         try:
             communities = self._graph.detect_communities()
-        except Exception:
+        except Exception as exc:
+            log.warning("community_detection_failed", error=str(exc))
             return suggestions
 
         # If we have multiple communities, look for entities that bridge them

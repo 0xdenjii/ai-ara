@@ -54,24 +54,31 @@ class ModelSpec:
 MODELS: dict[ModelRole, ModelSpec] = {
     ModelRole.PRIMARY_LLM: ModelSpec(
         role=ModelRole.PRIMARY_LLM,
-        name="Qwen3-30B-A3B",
+        name="Qwen3.5-35B-A3B",
         location=ModelLocation.GPU,
-        vram_gb=16.5,
+        vram_gb=20.5,
         ram_mb=0,
-        description="MoE: 30B total, 3B active per token. ~140 t/s @ 16K context.",
+        description=(
+            "Hybrid DeltaNet+MoE: 35B total, 3B active per token, 256 experts. "
+            "~122 t/s @ 32K. Native multimodal (text+image+video). 256K context. "
+            "Uses q8_0 KV cache + flash attention for comfortable 24GB VRAM fit."
+        ),
         quantization="Q4_K_M",
-        context_length=32768,
+        context_length=262144,
         license="Apache-2.0",
     ),
     ModelRole.LONG_CONTEXT_LLM: ModelSpec(
         role=ModelRole.LONG_CONTEXT_LLM,
-        name="Qwen3-14B",
+        name="Qwen3.5-27B",
         location=ModelLocation.GPU,
-        vram_gb=8.5,
+        vram_gb=17.0,
         ram_mb=0,
-        description="Dense 14B for 128K context diary deep analysis. Hot-swap with primary.",
+        description=(
+            "Dense 27B for deep analysis. All params active per token. "
+            "262K native context. ~35-45 t/s. Hot-swap with primary."
+        ),
         quantization="Q4_K_M",
-        context_length=131072,
+        context_length=262144,
         license="Apache-2.0",
     ),
     ModelRole.DRAFT_LLM: ModelSpec(
@@ -151,12 +158,16 @@ MODELS: dict[ModelRole, ModelSpec] = {
     ),
     ModelRole.VISION_ON_DEMAND: ModelSpec(
         role=ModelRole.VISION_ON_DEMAND,
-        name="Qwen2.5-VL-7B",
+        name="Qwen3.5-35B-A3B-Vision",
         location=ModelLocation.GPU,
-        vram_gb=5.0,
+        vram_gb=0,
         ram_mb=0,
-        description="Complex vision (OCR, documents). Hot-swap, requires unloading primary LLM.",
-        quantization="Q4",
+        description=(
+            "Native vision via Qwen3.5-35B-A3B. No separate model needed — "
+            "primary LLM includes integrated SigLIP vision encoder for OCR, "
+            "document analysis, and complex image understanding."
+        ),
+        quantization="Q4_K_M",
         license="Apache-2.0",
     ),
 }

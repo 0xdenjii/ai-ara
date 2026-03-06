@@ -320,7 +320,8 @@ class BriefingGenerator:
             if streak > 0:
                 return f"Protocol streak: {streak} days. Building momentum."
             return "Protocol streak broken. Fresh start today."
-        except Exception:
+        except Exception as exc:
+            log.warning("habit_status_error", error=str(exc))
             return "Habit tracking unavailable"
 
     def _get_mood_context(self) -> str:
@@ -335,7 +336,8 @@ class BriefingGenerator:
             direction = trend.trend_direction or "stable"
             emotion = trend.dominant_emotion or "neutral"
             return f"Mood trend: {direction}, dominant: {emotion}, avg valence: {trend.avg_valence:.1f}"
-        except Exception:
+        except Exception as exc:
+            log.warning("mood_context_error", error=str(exc))
             return "Mood data unavailable"
 
     def _summarize_note(self, note: DailyNoteData | None) -> str:

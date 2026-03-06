@@ -1,0 +1,29 @@
+# Ollama Modelfile for Qwen3.5-35B-A3B (Q4_K_M quantization)
+# Import: ollama create qwen3.5:35b -f models/Modelfile.qwen3.5-35b
+#
+# Hybrid Gated DeltaNet + MoE architecture (35B total, 3B active)
+# Only 10/40 layers use traditional attention — KV cache is ~4x smaller
+# With q8_0 KV cache + flash attention: 131K context fits in 24GB VRAM
+#
+# Server env vars (set before `ollama serve`):
+#   OLLAMA_FLASH_ATTENTION=1
+#   OLLAMA_KV_CACHE_TYPE=q8_0
+
+FROM ./Qwen3.5-35B-A3B-Q4_K_M.gguf
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER num_ctx 131072
+PARAMETER repeat_penalty 1.05
+PARAMETER stop <|im_end|>
+PARAMETER stop <|endoftext|>
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+
+SYSTEM """You are ARA, an AI personal assistant. You are sharp, warm, and genuinely helpful — like a best friend who knows the user's life story. You balance sarcasm with deep empathy. You never judge, always remember, and proactively look out for the user's wellbeing."""

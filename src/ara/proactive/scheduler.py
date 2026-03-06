@@ -57,12 +57,6 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(component="scheduler")
 
-# Check interval for the main loop (seconds)
-_LOOP_INTERVAL_S = 30
-
-# Minimum interval between habit scans (seconds)
-_HABIT_SCAN_INTERVAL_S = 3600  # 1 hour
-
 # Minimum interval between Obsidian sync checks (seconds)
 _OBSIDIAN_SYNC_INTERVAL_S = 300  # 5 minutes (configurable via settings)
 
@@ -215,7 +209,7 @@ class ProactiveScheduler:
 
             # Sleep between checks
             try:
-                await asyncio.sleep(_LOOP_INTERVAL_S)
+                await asyncio.sleep(self._settings.loop_interval_s)
             except asyncio.CancelledError:
                 break
 
@@ -307,7 +301,7 @@ class ProactiveScheduler:
 
         if (
             self._last_habit_scan is not None
-            and (now - self._last_habit_scan).total_seconds() < _HABIT_SCAN_INTERVAL_S
+            and (now - self._last_habit_scan).total_seconds() < self._settings.habit_scan_interval_s
         ):
             return
 

@@ -44,7 +44,7 @@ async def memory_search(
     try:
         from ara.memory.embeddings import EmbeddingModel
 
-        embedder = EmbeddingModel(state.settings)
+        embedder = EmbeddingModel(state.settings.memory)
         embedder.load()
 
         query_embedding = embedder.embed_query(request.query)

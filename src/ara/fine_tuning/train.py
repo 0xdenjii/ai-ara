@@ -1,7 +1,7 @@
 """QLoRA fine-tuning pipeline for ARA personality injection.
 
 Uses Unsloth + TRL's SFTTrainer for efficient QLoRA training on RTX 4090.
-Trains LoRA adapters on the base Qwen3-30B-A3B model to inject ARA's
+Trains LoRA adapters on the base Qwen3.5-35B-A3B model to inject ARA's
 personality, humor style, and personal knowledge.
 
 Pipeline:
@@ -80,7 +80,7 @@ class TrainingConfig:
     """Full training configuration."""
 
     # Model
-    base_model: str = "unsloth/Qwen3-30B-A3B-bnb-4bit"
+    base_model: str = "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
     max_seq_length: int = 4096
     load_in_4bit: bool = True
 
@@ -588,9 +588,9 @@ def import_to_ollama(
     modelfile_lines = [
         f'FROM "{gguf_path.resolve()}"',
         "",
-        "# Parameters optimized for ARA",
-        "PARAMETER temperature 0.8",
-        "PARAMETER num_ctx 32768",
+        "# Parameters optimized for ARA (Qwen3.5)",
+        "PARAMETER temperature 0.7",
+        "PARAMETER num_ctx 131072",
         "PARAMETER stop <|im_end|>",
         "PARAMETER stop <|endoftext|>",
     ]

@@ -18,7 +18,7 @@ Architecture:
 Usage:
     policy = PermissionPolicy.default()
     checker = PermissionChecker(settings, policy)
-    audit = AuditLogger(settings.data_dir / "tool_audit.sqlite")
+    audit = AuditLogger(settings.data_dir / settings.desktop.audit_db_name)
     await audit.connect()
     registry = ToolRegistry(settings, permission_checker=checker, audit_logger=audit.log)
 """

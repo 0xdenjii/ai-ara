@@ -25,9 +25,9 @@ class TestAraSettings:
 
     def test_llm_defaults(self) -> None:
         settings = AraSettings()
-        assert settings.llm.primary_model == "qwen3:30b-a3b"
-        assert settings.llm.temperature == 0.8
-        assert settings.llm.max_response_tokens == 2048
+        assert settings.llm.primary_model == "qwen3.5:35b"
+        assert settings.llm.temperature == 0.7
+        assert settings.llm.max_response_tokens == 4096
 
     def test_voice_defaults(self) -> None:
         settings = AraSettings()
@@ -83,7 +83,11 @@ class TestModelRegistry:
     def test_gpu_models_have_vram(self) -> None:
         for role, spec in MODELS.items():
             if spec.location == ModelLocation.GPU:
-                assert spec.vram_gb > 0, f"{role} is GPU but has 0 VRAM"
+                # VISION_ON_DEMAND uses native vision in primary LLM — no separate VRAM
+                if role == ModelRole.VISION_ON_DEMAND:
+                    assert spec.vram_gb >= 0, f"{role} is GPU but has negative VRAM"
+                else:
+                    assert spec.vram_gb > 0, f"{role} is GPU but has 0 VRAM"
 
     def test_cpu_models_have_zero_vram(self) -> None:
         for role, spec in MODELS.items():

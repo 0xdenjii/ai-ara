@@ -151,7 +151,7 @@ class LLMClient:
         ):
             yield token
 
-    async def swap_model(self, target_model: str) -> None:
+    async def swap_model(self, target_model: str, *, num_ctx: int | None = None) -> None:
         """Hot-swap to a different model.
 
         For Ollama: loads the new model via API (previous model unloaded by Ollama).
@@ -159,11 +159,13 @@ class LLMClient:
 
         Args:
             target_model: The model identifier to switch to.
+            num_ctx: Override context length for the new model. If None, uses
+                the configured ``ollama_num_ctx``.
 
         Raises:
             LLMModelSwapError: If the swap fails or is unsupported.
         """
-        await self._delegate.swap_model(target_model)
+        await self._delegate.swap_model(target_model, num_ctx=num_ctx)
 
     async def swap_to_primary(self) -> None:
         """Switch to the primary conversation model."""
@@ -303,6 +305,7 @@ class _OllamaBackend:
                 options={
                     "temperature": temp,
                     "num_predict": max_tok,
+                    "num_ctx": self._settings.llm.ollama_num_ctx,
                 },
             )
 
@@ -350,13 +353,19 @@ class _OllamaBackend:
                 },
             ) from exc
 
-    async def swap_model(self, target_model: str) -> None:
+    async def swap_model(self, target_model: str, *, num_ctx: int | None = None) -> None:
         previous = self._active_model
         if previous == target_model:
             log.info("swap_skipped", reason="already_active", model=target_model)
             return
 
-        log.info("model_swap_start", from_model=previous, to_model=target_model)
+        ctx = num_ctx or self._settings.llm.ollama_num_ctx
+        log.info(
+            "model_swap_start",
+            from_model=previous,
+            to_model=target_model,
+            num_ctx=ctx,
+        )
 
         try:
             models_response = await self._client.list()
@@ -373,7 +382,10 @@ class _OllamaBackend:
             await self._client.chat(
                 model=target_model,
                 messages=[{"role": "user", "content": "hi"}],
-                options={"num_predict": 1},
+                options={
+                    "num_predict": 1,
+                    "num_ctx": ctx,
+                },
             )
 
             self._active_model = target_model
@@ -385,10 +397,16 @@ class _OllamaBackend:
             raise LLMModelSwapError(previous, target_model, str(exc)) from exc
 
     async def swap_to_primary(self) -> None:
-        await self.swap_model(self._settings.llm.primary_model)
+        await self.swap_model(
+            self._settings.llm.primary_model,
+            num_ctx=self._settings.llm.primary_model_context_length,
+        )
 
     async def swap_to_long_context(self) -> None:
-        await self.swap_model(self._settings.llm.long_context_model)
+        await self.swap_model(
+            self._settings.llm.long_context_model,
+            num_ctx=self._settings.llm.long_context_length,
+        )
 
     async def list_models(self) -> list[dict[str, str | float]]:
         try:

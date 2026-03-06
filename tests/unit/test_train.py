@@ -55,7 +55,7 @@ class TestLoRAConfig:
 class TestTrainingConfig:
     def test_default_values(self) -> None:
         config = TrainingConfig()
-        assert config.base_model == "unsloth/Qwen3-30B-A3B-bnb-4bit"
+        assert config.base_model == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
         assert config.max_seq_length == 4096
         assert config.load_in_4bit is True
         assert config.num_epochs == 3
@@ -74,7 +74,7 @@ class TestTrainingConfig:
     def test_to_dict(self) -> None:
         config = TrainingConfig()
         data = config.to_dict()
-        assert data["base_model"] == "unsloth/Qwen3-30B-A3B-bnb-4bit"
+        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
         assert data["lora_rank"] == 16
         assert data["lora_alpha"] == 32
         assert data["effective_batch_size"] == 8
@@ -131,7 +131,7 @@ class TestSaveLoadConfig:
         save_config(config, output)
         assert output.exists()
         data = json.loads(output.read_text(encoding="utf-8"))
-        assert data["base_model"] == "unsloth/Qwen3-30B-A3B-bnb-4bit"
+        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
 
     def test_save_creates_directories(self, tmp_path: Path) -> None:
         config = TrainingConfig()

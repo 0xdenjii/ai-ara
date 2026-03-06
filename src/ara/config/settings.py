@@ -12,22 +12,30 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_ENV_FILE_OPTS = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
 
 class LLMSettings(BaseSettings):
     """LLM inference configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_")
+    model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
     backend_type: str = "ollama"  # "ollama" or "llamacpp"
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
-    primary_model: str = "qwen3:30b-a3b"
-    long_context_model: str = "qwen3:14b"
+    primary_model: str = "qwen3.5:35b"
+    long_context_model: str = "qwen3.5:27b"
     draft_model: str = "qwen3:1b"
-    primary_model_context_length: int = 32768
-    long_context_length: int = 131072
-    temperature: float = 0.8
-    max_response_tokens: int = 2048
+    primary_model_context_length: int = 131072
+    long_context_length: int = 262144
+    temperature: float = 0.7
+    max_response_tokens: int = 4096
+
+    # ── Ollama performance tuning ────────────────────────────────────────
+    # These map to Ollama server env vars (OLLAMA_FLASH_ATTENTION, etc.)
+    ollama_flash_attention: bool = True  # Reduce peak VRAM during attention
+    ollama_kv_cache_type: str = "q8_0"  # KV cache quantization: f16, q8_0, q4_0
+    ollama_num_ctx: int = 131072  # Context length for Ollama requests
 
     # ── Speculative Decoding (llama.cpp server only) ─────────────────────
     # These settings configure llama-server's speculative decoding feature.
@@ -42,17 +50,21 @@ class LLMSettings(BaseSettings):
     # ── llama.cpp Server Options ─────────────────────────────────────────
     llamacpp_n_gpu_layers: int = -1  # GPU layers for primary model (-1 = all)
     llamacpp_flash_attn: bool = True  # Enable flash attention (recommended for RTX 4090)
-    llamacpp_context_size: int = 32768  # KV cache context size
+    llamacpp_kv_cache_type_k: str = "q8_0"  # KV cache quantization for K: f16, q8_0, q4_0
+    llamacpp_kv_cache_type_v: str = "q8_0"  # KV cache quantization for V: f16, q8_0, q4_0
+    llamacpp_context_size: int = 131072  # KV cache context size
     llamacpp_batch_size: int = 2048  # Batch size for prompt processing
     llamacpp_threads: int = 0  # CPU threads (0 = auto-detect)
     llamacpp_host: str = "127.0.0.1"
     llamacpp_port: int = 8080
+    llamacpp_generation_timeout_s: float = 300.0  # Timeout for generation requests (5 min)
+    llamacpp_health_timeout_s: float = 10.0  # Timeout for health/connectivity checks
 
 
 class AudioSettings(BaseSettings):
     """Audio capture and playback configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_AUDIO_")
+    model_config = SettingsConfigDict(env_prefix="ARA_AUDIO_", **_ENV_FILE_OPTS)
 
     sample_rate: int = 16000
     channels: int = 1
@@ -62,7 +74,7 @@ class AudioSettings(BaseSettings):
 class STTSettings(BaseSettings):
     """Speech-to-text (Moonshine v2 via moonshine-voice) configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_STT_")
+    model_config = SettingsConfigDict(env_prefix="ARA_STT_", **_ENV_FILE_OPTS)
 
     # moonshine-voice downloads to its own cache dir;
     # path and arch are discovered via `python -m moonshine_voice.download`
@@ -73,7 +85,7 @@ class STTSettings(BaseSettings):
 class TTSSettings(BaseSettings):
     """Text-to-speech (Kokoro-82M ONNX) configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_TTS_")
+    model_config = SettingsConfigDict(env_prefix="ARA_TTS_", **_ENV_FILE_OPTS)
 
     model_path: Path = Path("./data/models/kokoro/kokoro-v1.0.int8.onnx")
     voices_path: Path = Path("./data/models/kokoro/voices-v1.0.bin")
@@ -86,7 +98,7 @@ class TTSSettings(BaseSettings):
 class VADSettings(BaseSettings):
     """Voice activity detection (Silero VAD) configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_VAD_")
+    model_config = SettingsConfigDict(env_prefix="ARA_VAD_", **_ENV_FILE_OPTS)
 
     threshold: float = 0.5
     min_speech_ms: int = 250
@@ -97,7 +109,7 @@ class VADSettings(BaseSettings):
 class WakeWordSettings(BaseSettings):
     """Wake word detection (openWakeWord) configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_WAKE_WORD_")
+    model_config = SettingsConfigDict(env_prefix="ARA_WAKE_WORD_", **_ENV_FILE_OPTS)
 
     # Uses pre-trained "hey_jarvis" until custom "hey_ara" is trained
     model_names: list[str] = ["hey_jarvis_v0.1"]
@@ -109,7 +121,7 @@ class WakeWordSettings(BaseSettings):
 class MemorySettings(BaseSettings):
     """Memory, RAG, and knowledge graph configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_")
+    model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
     vector_db_path: Path = Path("./data/vector_db")
     graph_db_path: Path = Path("./data/graph_db/graph.sqlite")
@@ -124,7 +136,7 @@ class MemorySettings(BaseSettings):
 class ConversationSettings(BaseSettings):
     """Conversation persistence and memory feedback loop configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_CONVERSATION_")
+    model_config = SettingsConfigDict(env_prefix="ARA_CONVERSATION_", **_ENV_FILE_OPTS)
 
     silence_timeout_s: int = 300
     min_turns_to_persist: int = 3
@@ -136,7 +148,7 @@ class ConversationSettings(BaseSettings):
 class VisionSettings(BaseSettings):
     """Vision pipeline configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_")
+    model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
     moondream_model: str = "vikhyatk/moondream2"
     qwen_vl_model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -146,18 +158,21 @@ class VisionSettings(BaseSettings):
 class InternetSettings(BaseSettings):
     """Internet connectivity layer configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_")
+    model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
     internet_enabled: bool = True
     searxng_url: str = "http://localhost:8888"
     web_cache_ttl_s: int = 3600
     max_research_steps: int = 5
+    connectivity_check_timeout_s: float = 3.0  # Timeout for individual connectivity checks
+    connectivity_check_interval_s: float = 10.0  # Min interval between network checks
+    connectivity_background_interval_s: float = 60.0  # Background check interval
 
 
 class PersonalitySettings(BaseSettings):
     """ARA personality and humor configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_")
+    model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
     humor_dial: int = Field(default=7, ge=1, le=10)
     voice_identity: Literal["female"] = "female"
@@ -175,7 +190,7 @@ class PersonalitySettings(BaseSettings):
 class APISettings(BaseSettings):
     """FastAPI server configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_API_")
+    model_config = SettingsConfigDict(env_prefix="ARA_API_", **_ENV_FILE_OPTS)
 
     host: str = "127.0.0.1"
     port: int = 8000
@@ -185,7 +200,7 @@ class APISettings(BaseSettings):
 class DesktopSettings(BaseSettings):
     """Desktop automation configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_DESKTOP_")
+    model_config = SettingsConfigDict(env_prefix="ARA_DESKTOP_", **_ENV_FILE_OPTS)
 
     enabled: bool = True
     require_confirmation: bool = True
@@ -198,9 +213,13 @@ class DesktopSettings(BaseSettings):
 class ProactiveSettings(BaseSettings):
     """Proactive features configuration — suggestions, recaps, habits, mood, reviews."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_PROACTIVE_")
+    model_config = SettingsConfigDict(env_prefix="ARA_PROACTIVE_", **_ENV_FILE_OPTS)
 
     enabled: bool = True
+
+    # Scheduler loop timing
+    loop_interval_s: int = 30  # Main scheduler check interval
+    habit_scan_interval_s: int = 3600  # Minimum interval between habit scans (1 hour)
 
     # Idle-state suggestions (P12-01)
     idle_check_interval_s: int = 300  # check every 5 minutes
@@ -240,7 +259,7 @@ class ProactiveSettings(BaseSettings):
 class ObsidianSettings(BaseSettings):
     """Obsidian vault integration configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="ARA_OBSIDIAN_")
+    model_config = SettingsConfigDict(env_prefix="ARA_OBSIDIAN_", **_ENV_FILE_OPTS)
 
     enabled: bool = True
     api_url: str = "https://127.0.0.1:27124"
@@ -277,6 +296,21 @@ class ObsidianSettings(BaseSettings):
     # ── RAG ingestion ────────────────────────────────────────────────────
     ingest_on_sync: bool = True  # Auto-ingest changed notes into vector store
     ingest_batch_size: int = 10  # Notes per batch for ingestion
+
+
+class MCPSettings(BaseSettings):
+    """MCP (Model Context Protocol) server integration configuration.
+
+    Defines external MCP servers that ARA can connect to for extended tool access.
+    Server configs are auto-discovered from Claude Desktop, Antigravity, and manual entries.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ARA_MCP_", **_ENV_FILE_OPTS)
+
+    enabled: bool = True  # Master toggle for MCP server connections
+    auto_discover: bool = True  # Auto-discover from Claude Desktop / Antigravity configs
+    connect_timeout_s: float = 30.0  # Timeout for connecting to each MCP server
+    max_retries: int = 2  # Retries per server before giving up
 
 
 class AraSettings(BaseSettings):
@@ -319,6 +353,7 @@ class AraSettings(BaseSettings):
     desktop: DesktopSettings = Field(default_factory=DesktopSettings)
     proactive: ProactiveSettings = Field(default_factory=ProactiveSettings)
     obsidian: ObsidianSettings = Field(default_factory=ObsidianSettings)
+    mcp: MCPSettings = Field(default_factory=MCPSettings)
 
     @field_validator("data_dir", mode="before")
     @classmethod

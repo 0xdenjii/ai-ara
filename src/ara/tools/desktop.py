@@ -407,7 +407,7 @@ class ScreenshotTool(BaseTool):
         if path_str:
             save_path = Path(path_str)
         else:
-            screenshot_dir = self._settings.data_dir / "screenshots"
+            screenshot_dir = self._settings.data_dir / self._settings.desktop.screenshot_dir
             screenshot_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_path = screenshot_dir / f"screenshot_{timestamp}.png"
@@ -490,7 +490,8 @@ class ListWindowsTool(BaseTool):
                         visible.append(
                             f"  - {title} (pos: {rect.left},{rect.top} size: {rect.width()}x{rect.height()})"
                         )
-                    except Exception:
+                    except Exception as exc:
+                        log.debug("window_rect_unavailable", title=title[:50], error=str(exc))
                         visible.append(f"  - {title}")
 
             if not visible:

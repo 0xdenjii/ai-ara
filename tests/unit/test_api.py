@@ -51,7 +51,7 @@ def mock_app_state(settings: AraSettings) -> AppState:
     state = AppState(settings=settings)
     state.llm_client = MagicMock()
     state.llm_client.is_connected = True
-    state.llm_client.active_model = "qwen3:30b-a3b"
+    state.llm_client.active_model = "qwen3.5:35b"
     state.llm_client.generate = AsyncMock(return_value="Hello from ARA!")
     state.llm_client.generate_stream = AsyncMock()
     return state
@@ -239,7 +239,7 @@ class TestHealthEndpoint:
     def test_health_shows_loaded_models(self, client: TestClient) -> None:
         resp = client.get("/health")
         data = resp.json()
-        assert "qwen3:30b-a3b" in data["models_loaded"]
+        assert "qwen3.5:35b" in data["models_loaded"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,7 +409,7 @@ class TestModelsEndpoint:
         assert len(data) > 0
         # Check primary LLM is in the list
         names = [m["name"] for m in data]
-        assert "Qwen3-30B-A3B" in names
+        assert "Qwen3.5-35B-A3B" in names
 
     def test_vram_usage(self, client: TestClient) -> None:
         resp = client.get("/api/models/vram")

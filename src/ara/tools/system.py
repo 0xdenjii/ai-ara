@@ -110,9 +110,6 @@ _COMMAND_BLACKLIST_PATTERNS: tuple[str, ...] = (
 # Maximum output length from commands (characters)
 _MAX_OUTPUT_LENGTH = 10000
 
-# Maximum execution time for commands (seconds)
-_MAX_EXECUTION_SECONDS = 30.0
-
 
 def _is_command_allowed(command: str) -> bool:
     """Check if a command is allowed by the whitelist.
@@ -157,9 +154,11 @@ class RunCommandTool(BaseTool):
                 ToolParameter(
                     name="timeout",
                     param_type=ParameterType.FLOAT,
-                    description="Timeout in seconds (max 30).",
+                    description=(
+                        f"Timeout in seconds (max {self._settings.desktop.command_timeout_seconds})."
+                    ),
                     required=False,
-                    default=_MAX_EXECUTION_SECONDS,
+                    default=self._settings.desktop.command_timeout_seconds,
                 ),
             ),
             risk_level=ToolRiskLevel.DANGEROUS,
@@ -168,9 +167,8 @@ class RunCommandTool(BaseTool):
 
     async def execute(self, parameters: dict[str, Any]) -> str:
         command = parameters["command"].strip()
-        timeout = min(
-            float(parameters.get("timeout", _MAX_EXECUTION_SECONDS)), _MAX_EXECUTION_SECONDS
-        )
+        max_timeout = self._settings.desktop.command_timeout_seconds
+        timeout = min(float(parameters.get("timeout", max_timeout)), max_timeout)
 
         if not _is_command_allowed(command):
             raise DesktopError(
@@ -230,17 +228,16 @@ class RunCommandTool(BaseTool):
 
 # ── File Read ────────────────────────────────────────────────────────────────
 
-_MAX_FILE_READ_BYTES = 100_000  # 100KB
-
 
 class FileReadTool(BaseTool):
     """Read contents of a file."""
 
     @property
     def schema(self) -> ToolSchema:
+        max_kb = self._settings.desktop.max_file_read_bytes // 1024
         return ToolSchema(
             name="file_read",
-            description="Reads the contents of a text file (up to 100KB).",
+            description=f"Reads the contents of a text file (up to {max_kb}KB).",
             parameters=(
                 ToolParameter(
                     name="path",
@@ -279,11 +276,12 @@ class FileReadTool(BaseTool):
             )
 
         file_size = path.stat().st_size
-        if file_size > _MAX_FILE_READ_BYTES:
+        max_read = self._settings.desktop.max_file_read_bytes
+        if file_size > max_read:
             raise DesktopError(
-                f"File too large: {file_size} bytes (max {_MAX_FILE_READ_BYTES})",
+                f"File too large: {file_size} bytes (max {max_read})",
                 operation="file_read",
-                details={"path": str(path), "size": file_size},
+                details={"path": str(path), "size": file_size, "max_bytes": max_read},
             )
 
         try:

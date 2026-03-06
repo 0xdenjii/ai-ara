@@ -517,7 +517,7 @@ class TestLlamaCppProperties:
 
     def test_active_model(self, settings: AraSettings) -> None:
         client = LlamaCppClient(settings)
-        assert client.active_model == "qwen3:30b-a3b"
+        assert client.active_model == "qwen3.5:35b"
 
     def test_is_connected_default_false(self, settings: AraSettings) -> None:
         client = LlamaCppClient(settings)
@@ -587,7 +587,7 @@ class TestLLMClientBackendSelection:
         client._delegate = MagicMock()
         client._delegate.swap_model = AsyncMock()
         await client.swap_model("other-model")
-        client._delegate.swap_model.assert_awaited_once_with("other-model")
+        client._delegate.swap_model.assert_awaited_once_with("other-model", num_ctx=None)
 
     @pytest.mark.asyncio
     async def test_list_models_delegates(self, settings: AraSettings) -> None:
@@ -599,7 +599,7 @@ class TestLLMClientBackendSelection:
 
     def test_active_model_delegates(self, settings: AraSettings) -> None:
         client = LLMClient(settings)
-        assert client.active_model == "qwen3:30b-a3b"
+        assert client.active_model == "qwen3.5:35b"
 
     def test_is_connected_delegates(self, settings: AraSettings) -> None:
         client = LLMClient(settings)
@@ -738,7 +738,7 @@ class TestSpeculativeSettings:
         s = AraSettings(_env_file=None)
         assert s.llm.llamacpp_n_gpu_layers == -1
         assert s.llm.llamacpp_flash_attn is True
-        assert s.llm.llamacpp_context_size == 32768
+        assert s.llm.llamacpp_context_size == 131072
         assert s.llm.llamacpp_batch_size == 2048
         assert s.llm.llamacpp_threads == 0
         assert s.llm.llamacpp_host == "127.0.0.1"

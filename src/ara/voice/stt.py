@@ -172,10 +172,10 @@ class STTProcessor:
         self._current_text = ""
         self._events.clear()
         if self._transcriber is not None:
-            import contextlib
-
-            with contextlib.suppress(Exception):
+            try:
                 self._transcriber.stop()
+            except Exception as exc:
+                log.debug("transcriber_stop_before_restart_failed", error=str(exc))
             self._transcriber.start()
         log.debug("stt_utterance_started")
 

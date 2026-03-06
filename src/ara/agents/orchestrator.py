@@ -350,7 +350,8 @@ class Orchestrator:
                 ChatMessage(role="user", content=query),  # type: ignore[arg-type]
             ]
             response = await self._llm.generate(messages, max_tokens=200)
-        except Exception:
+        except Exception as exc:
+            log.warning("error_recovery_llm_failed", error=str(exc))
             response = (
                 "Sorry, I ran into an issue processing that. "
                 "Could you try rephrasing your question?"

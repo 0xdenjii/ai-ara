@@ -60,11 +60,21 @@ class ProtocolTracker:
             date_str: Date in YYYY-MM-DD format.
 
         Returns:
-            ProtocolScore with completion metrics.
+            ProtocolScore with completion metrics. Returns zero-score if
+            protocol tracking is disabled in settings.
         """
-        # Check cache first
+        # Check cache first (always return cached results even when disabled)
         if date_str in self.scores:
             return self.scores[date_str]
+
+        if not self._settings.protocol_tracking_enabled:
+            return ProtocolScore(
+                date=date_str,
+                completed_items=0,
+                total_items=0,
+                score_pct=0.0,
+                missed_items=[],
+            )
 
         note = await self._sync.get_daily_note(date_str)
         score = self._compute_score(date_str, note)

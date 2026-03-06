@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ara import __version__
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Common / Shared
 # ══════════════════════════════════════════════════════════════════════════════
@@ -36,7 +38,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
 
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = __version__
     uptime_s: float = 0.0
     models_loaded: list[str] = Field(default_factory=list)
 
