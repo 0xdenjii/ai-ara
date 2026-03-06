@@ -44,8 +44,10 @@ import structlog
 from ara.utils.types import NotificationPriority, VoicePipelineState
 
 if TYPE_CHECKING:
-    from ara.config.settings import ProactiveSettings
+    from ara.config.settings import ObsidianSettings, ProactiveSettings
     from ara.core.llm import LLMClient
+    from ara.obsidian.daily_briefing import BriefingGenerator
+    from ara.obsidian.sync import ObsidianSync
     from ara.proactive.habits import HabitDetector
     from ara.proactive.mood import MoodTracker
     from ara.proactive.notifications import NotificationQueue
@@ -60,6 +62,9 @@ _LOOP_INTERVAL_S = 30
 
 # Minimum interval between habit scans (seconds)
 _HABIT_SCAN_INTERVAL_S = 3600  # 1 hour
+
+# Minimum interval between Obsidian sync checks (seconds)
+_OBSIDIAN_SYNC_INTERVAL_S = 300  # 5 minutes (configurable via settings)
 
 
 class ProactiveScheduler:
@@ -87,6 +92,9 @@ class ProactiveScheduler:
         recap_generator: RecapGenerator | None = None,
         review_generator: ReviewGenerator | None = None,
         llm_client: LLMClient | None = None,
+        obsidian_sync: ObsidianSync | None = None,
+        obsidian_settings: ObsidianSettings | None = None,
+        briefing_generator: BriefingGenerator | None = None,
     ) -> None:
         self._settings = settings
         self._enabled = settings.enabled
@@ -97,6 +105,11 @@ class ProactiveScheduler:
         self._recap = recap_generator
         self._review = review_generator
         self._llm = llm_client
+
+        # Obsidian integration (optional)
+        self._obsidian_sync = obsidian_sync
+        self._obsidian_settings = obsidian_settings
+        self._briefing = briefing_generator
 
         # Scheduling state
         self._task: asyncio.Task[None] | None = None
@@ -110,6 +123,9 @@ class ProactiveScheduler:
         self._last_recap_date: str = ""  # Date string "YYYY-MM-DD"
         self._last_weekly_review_date: str = ""
         self._last_monthly_review_date: str = ""
+        self._last_obsidian_sync: datetime | None = None
+        self._last_morning_briefing_date: str = ""
+        self._last_eod_recap_date: str = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -186,6 +202,11 @@ class ProactiveScheduler:
                 await self._check_habit_scan(now)
                 await self._check_weekly_review(now)
                 await self._check_monthly_review(now)
+
+                # Obsidian integration checks
+                await self._check_obsidian_sync(now)
+                await self._check_morning_briefing(now)
+                await self._check_eod_recap(now)
 
             except asyncio.CancelledError:
                 break
@@ -379,6 +400,102 @@ class ProactiveScheduler:
             except Exception:
                 log.warning("monthly_review_failed", exc_info=True)
 
+    # ── Obsidian Integration ─────────────────────────────────────────────
+
+    async def _check_obsidian_sync(self, now: datetime) -> None:
+        """Run incremental Obsidian vault sync if due."""
+        if self._obsidian_sync is None:
+            return
+
+        sync_interval = (
+            self._obsidian_settings.sync_interval_s
+            if self._obsidian_settings is not None
+            else _OBSIDIAN_SYNC_INTERVAL_S
+        )
+
+        if (
+            self._last_obsidian_sync is not None
+            and (now - self._last_obsidian_sync).total_seconds() < sync_interval
+        ):
+            return
+
+        try:
+            state = await self._obsidian_sync.incremental_sync()
+            self._last_obsidian_sync = now
+
+            if state.notes_changed > 0:
+                log.info(
+                    "obsidian_sync_changes_detected",
+                    changed=state.notes_changed,
+                    ingested=state.notes_ingested,
+                )
+
+        except Exception:
+            log.warning("obsidian_sync_failed", exc_info=True)
+
+    async def _check_morning_briefing(self, now: datetime) -> None:
+        """Generate morning briefing if it's the configured hour."""
+        if self._briefing is None or self._obsidian_settings is None:
+            return
+
+        if not self._obsidian_settings.morning_briefing_enabled:
+            return
+
+        today_str = now.strftime("%Y-%m-%d")
+        if today_str == self._last_morning_briefing_date:
+            return
+
+        if now.hour == self._obsidian_settings.morning_briefing_hour:
+            try:
+                briefing = await self._briefing.generate_morning_briefing(
+                    llm_client=self._llm, now=now
+                )
+                self._queue.enqueue(
+                    title="Morning Briefing",
+                    message=briefing.yesterday_summary,
+                    priority=NotificationPriority.HIGH,
+                    source="obsidian_briefing",
+                    metadata={
+                        "briefing_id": briefing.briefing_id,
+                        "pending_tasks": len(briefing.pending_tasks),
+                        "protocol_score": briefing.protocol_score,
+                    },
+                )
+                self._last_morning_briefing_date = today_str
+                log.info("morning_briefing_enqueued", date=today_str)
+
+            except Exception:
+                log.warning("morning_briefing_failed", exc_info=True)
+
+    async def _check_eod_recap(self, now: datetime) -> None:
+        """Generate end-of-day Obsidian recap if it's the configured hour."""
+        if self._briefing is None or self._obsidian_settings is None:
+            return
+
+        if not self._obsidian_settings.end_of_day_recap_enabled:
+            return
+
+        today_str = now.strftime("%Y-%m-%d")
+        if today_str == self._last_eod_recap_date:
+            return
+
+        if now.hour == self._obsidian_settings.end_of_day_recap_hour:
+            try:
+                recap_text = await self._briefing.generate_end_of_day_recap(
+                    llm_client=self._llm, now=now
+                )
+                self._queue.enqueue(
+                    title="End of Day Recap",
+                    message=recap_text,
+                    priority=NotificationPriority.MEDIUM,
+                    source="obsidian_eod",
+                )
+                self._last_eod_recap_date = today_str
+                log.info("eod_recap_enqueued", date=today_str)
+
+            except Exception:
+                log.warning("eod_recap_failed", exc_info=True)
+
     # ── Stats ─────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict[str, object]:
@@ -398,5 +515,10 @@ class ProactiveScheduler:
             "last_recap_date": self._last_recap_date or None,
             "last_weekly_review": self._last_weekly_review_date or None,
             "last_monthly_review": self._last_monthly_review_date or None,
+            "last_obsidian_sync": (
+                self._last_obsidian_sync.isoformat() if self._last_obsidian_sync else None
+            ),
+            "last_morning_briefing": self._last_morning_briefing_date or None,
+            "last_eod_recap": self._last_eod_recap_date or None,
             "notification_queue": self._queue.get_stats(),
         }
