@@ -21,14 +21,14 @@ env/
 *.onnx
 
 # Data directories (models, vector DB, graph DB, diaries)
-data/
+# data/
 
 # AI agent instructions and planning (never commit)
-instructions.md
-final-product.md
-no-commit/
+# instructions.md
+# final-product.md
+# no-commit/
 dairy
-.research/
+# .research/
 Ccodebasesai-arano-committmp_today.md
 
 # IDE
