@@ -462,7 +462,7 @@ class DiaryPreprocessor:
             # Only exclude if the file is PRIMARILY key material
             key_matches = len(_PRIVATE_KEY_CONTENT.findall(analysis_text))
             total_lines = max(line_count, 1)
-            if key_matches > 3 or (key_matches / total_lines) > 0.1:
+            if key_matches > 10 or (key_matches / total_lines) > 0.1:
                 return FileClassification(
                     path=file_path,
                     content_type=ContentType.PRIVATE_KEYS,

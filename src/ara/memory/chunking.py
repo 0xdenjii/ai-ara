@@ -104,6 +104,7 @@ class TextChunker:
         *,
         source_file: str = "",
         default_date: datetime | None = None,
+        source: MemorySource = MemorySource.DIARY,
     ) -> list[MemoryChunk]:
         """Split a markdown document into chunks with metadata.
 
@@ -111,6 +112,7 @@ class TextChunker:
             text: The full markdown document text.
             source_file: Name/path of the source file.
             default_date: Fallback date if none found in headers.
+            source: The MemorySource type for all chunks (default: DIARY).
 
         Returns:
             List of MemoryChunk objects with populated metadata.
@@ -131,6 +133,7 @@ class TextChunker:
                 section_title=section.get("title", ""),
                 source_file=source_file,
                 start_index=chunk_index,
+                source=source,
             )
             all_chunks.extend(section_chunks)
             chunk_index += len(section_chunks)
@@ -168,6 +171,7 @@ class TextChunker:
         source_file: str = "",
         date: datetime | None = None,
         section_title: str = "",
+        source: MemorySource = MemorySource.DIARY,
     ) -> list[MemoryChunk]:
         """Split plain text into chunks (no markdown parsing).
 
@@ -178,6 +182,7 @@ class TextChunker:
             source_file: Source identifier.
             date: Associated date.
             section_title: Section context.
+            source: The MemorySource type for all chunks (default: DIARY).
 
         Returns:
             List of MemoryChunk objects.
@@ -191,6 +196,7 @@ class TextChunker:
             section_title=section_title,
             source_file=source_file,
             start_index=0,
+            source=source,
         )
 
     def _parse_sections(
@@ -285,6 +291,7 @@ class TextChunker:
         section_title: str = "",
         source_file: str = "",
         start_index: int = 0,
+        source: MemorySource = MemorySource.DIARY,
     ) -> list[MemoryChunk]:
         """Split a section of text into token-bounded chunks.
 
@@ -306,6 +313,7 @@ class TextChunker:
                 section_title=section_title,
                 source_file=source_file,
                 chunk_index=start_index,
+                source=source,
             )
             return [chunk]
 
@@ -333,6 +341,7 @@ class TextChunker:
                         section_title=section_title,
                         source_file=source_file,
                         chunk_index=start_index + len(chunks),
+                        source=source,
                     )
                     chunks.append(chunk)
                     overlap_text = self._get_overlap_tail("\n\n".join(current_parts))
@@ -349,6 +358,7 @@ class TextChunker:
                         section_title=section_title,
                         source_file=source_file,
                         chunk_index=start_index + len(chunks),
+                        source=source,
                     )
                     chunks.append(chunk)
                     overlap_text = self._get_overlap_tail(sc)
@@ -367,6 +377,7 @@ class TextChunker:
                     section_title=section_title,
                     source_file=source_file,
                     chunk_index=start_index + len(chunks),
+                    source=source,
                 )
                 chunks.append(chunk)
                 overlap_text = self._get_overlap_tail("\n\n".join(current_parts))
@@ -394,6 +405,7 @@ class TextChunker:
                     section_title=section_title,
                     source_file=source_file,
                     chunk_index=prev.metadata.get("chunk_index", start_index + len(chunks)),
+                    source=source,
                 )
                 chunks.append(chunk)
             else:
@@ -403,6 +415,7 @@ class TextChunker:
                     section_title=section_title,
                     source_file=source_file,
                     chunk_index=start_index + len(chunks),
+                    source=source,
                 )
                 chunks.append(chunk)
 
@@ -454,6 +467,7 @@ class TextChunker:
         section_title: str,
         source_file: str,
         chunk_index: int,
+        source: MemorySource = MemorySource.DIARY,
     ) -> MemoryChunk:
         """Create a MemoryChunk with a deterministic ID."""
         from hashlib import sha256
@@ -475,7 +489,7 @@ class TextChunker:
         return MemoryChunk(
             chunk_id=chunk_id,
             text=text,
-            source=MemorySource.DIARY,
+            source=source,
             source_file=source_file,
             date=date,
             section_title=section_title,

@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -180,6 +181,7 @@ class ConversationStore:
         self._min_turns = settings.min_turns_to_persist
         self._conn: sqlite3.Connection | None = None
         self._active_conversations: dict[str, datetime] = {}
+        self._lock = threading.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -258,13 +260,13 @@ class ConversationStore:
 
         import json
 
-        conn.execute(
-            "INSERT INTO conversations (conversation_id, started_at, metadata) VALUES (?, ?, ?)",
-            (conv_id, now.isoformat(), json.dumps(metadata or {})),
-        )
-        conn.commit()
-
-        self._active_conversations[conv_id] = now
+        with self._lock:
+            conn.execute(
+                "INSERT INTO conversations (conversation_id, started_at, metadata) VALUES (?, ?, ?)",
+                (conv_id, now.isoformat(), json.dumps(metadata or {})),
+            )
+            conn.commit()
+            self._active_conversations[conv_id] = now
 
         log.info("conversation_started", conversation_id=conv_id)
         return conv_id
@@ -304,22 +306,22 @@ class ConversationStore:
             metadata=metadata or {},
         )
 
-        conn.execute(
-            "INSERT INTO turns (turn_id, conversation_id, user_message, assistant_message, timestamp, intent, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                turn.turn_id,
-                conversation_id,
-                user_message,
-                assistant_message,
-                turn.timestamp.isoformat(),
-                intent.value,
-                json.dumps(metadata or {}),
-            ),
-        )
-        conn.commit()
-
-        # Update last activity time
-        self._active_conversations[conversation_id] = datetime.now()
+        with self._lock:
+            conn.execute(
+                "INSERT INTO turns (turn_id, conversation_id, user_message, assistant_message, timestamp, intent, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    turn.turn_id,
+                    conversation_id,
+                    user_message,
+                    assistant_message,
+                    turn.timestamp.isoformat(),
+                    intent.value,
+                    json.dumps(metadata or {}),
+                ),
+            )
+            conn.commit()
+            # Update last activity time (inside lock to avoid TOCTOU races)
+            self._active_conversations[conversation_id] = datetime.now()
 
         log.debug(
             "turn_added",
@@ -346,11 +348,12 @@ class ConversationStore:
         conn = self._ensure_connected()
         now = datetime.now()
 
-        conn.execute(
-            "UPDATE conversations SET ended_at = ?, end_reason = ?, summary = ? WHERE conversation_id = ?",
-            (now.isoformat(), reason.value, summary, conversation_id),
-        )
-        conn.commit()
+        with self._lock:
+            conn.execute(
+                "UPDATE conversations SET ended_at = ?, end_reason = ?, summary = ? WHERE conversation_id = ?",
+                (now.isoformat(), reason.value, summary, conversation_id),
+            )
+            conn.commit()
 
         self._active_conversations.pop(conversation_id, None)
 
@@ -400,7 +403,8 @@ class ConversationStore:
         now = datetime.now()
         threshold = timedelta(seconds=self._silence_timeout_s)
 
-        for conv_id, last_activity in self._active_conversations.items():
+        # Copy items to avoid RuntimeError if dict is modified concurrently
+        for conv_id, last_activity in list(self._active_conversations.items()):
             if now - last_activity >= threshold:
                 timed_out.append(conv_id)
 
@@ -523,11 +527,12 @@ class ConversationStore:
             summary: The generated summary text.
         """
         conn = self._ensure_connected()
-        conn.execute(
-            "UPDATE conversations SET processed = 1, summary = ? WHERE conversation_id = ?",
-            (summary, conversation_id),
-        )
-        conn.commit()
+        with self._lock:
+            conn.execute(
+                "UPDATE conversations SET processed = 1, summary = ? WHERE conversation_id = ?",
+                (summary, conversation_id),
+            )
+            conn.commit()
 
         log.info(
             "conversation_marked_processed",

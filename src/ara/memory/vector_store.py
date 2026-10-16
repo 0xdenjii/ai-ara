@@ -72,6 +72,7 @@ class VectorStore:
         self._db: lancedb.DBConnection | None = None
         self._table: lancedb.table.Table | None = None
         self._connected = False
+        self._fts_index_created: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -198,12 +199,16 @@ class VectorStore:
             else:
                 # Delete existing chunks with same IDs, then add new ones
                 chunk_ids = [r["chunk_id"] for r in records]
-                id_list = ", ".join(f"'{cid}'" for cid in chunk_ids)
+                id_list = ", ".join(
+                    f"'{cid.replace(chr(39), chr(39) + chr(39))}'" for cid in chunk_ids
+                )
                 try:
                     self._table.delete(f"chunk_id IN ({id_list})")
                 except Exception as exc:
                     log.debug("chunk_delete_before_upsert_failed", error=str(exc))
                 self._table.add(records)
+
+            self._fts_index_created = False  # Invalidate FTS index after data changes
 
             elapsed_ms = (time.monotonic() - start) * 1000
             log.info(
@@ -258,11 +263,14 @@ class VectorStore:
             # Apply filters
             filters: list[str] = []
             if source_filter is not None:
-                filters.append(f"source = '{source_filter.value}'")
+                safe_source = source_filter.value.replace("'", "''")
+                filters.append(f"source = '{safe_source}'")
             if date_from is not None:
-                filters.append(f"date >= '{date_from.isoformat()}'")
+                safe_date_from = date_from.isoformat().replace("'", "''")
+                filters.append(f"date >= '{safe_date_from}'")
             if date_to is not None:
-                filters.append(f"date <= '{date_to.isoformat()}'")
+                safe_date_to = date_to.isoformat().replace("'", "''")
+                filters.append(f"date <= '{safe_date_to}'")
 
             if filters:
                 where_clause = " AND ".join(filters)
@@ -312,11 +320,13 @@ class VectorStore:
         start = time.monotonic()
 
         try:
-            # Create FTS index if not exists
-            try:
-                self._table.create_fts_index("text", replace=True)
-            except Exception as exc:
-                log.debug("fts_index_creation_failed", error=str(exc))
+            # Create FTS index if not already created
+            if not self._fts_index_created:
+                try:
+                    self._table.create_fts_index("text", replace=True)
+                    self._fts_index_created = True
+                except Exception as exc:
+                    log.debug("fts_index_creation_failed", error=str(exc))
 
             results = self._table.search(query_text, query_type="fts").limit(top_k).to_list()
 
@@ -351,7 +361,8 @@ class VectorStore:
 
         count_before = self._table.count_rows()
         try:
-            self._table.delete(f"source_file = '{source_file}'")
+            safe_source_file = source_file.replace("'", "''")
+            self._table.delete(f"source_file = '{safe_source_file}'")
             count_after = self._table.count_rows()
             deleted = count_before - count_after
             log.info(

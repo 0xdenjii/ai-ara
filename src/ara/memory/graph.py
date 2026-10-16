@@ -235,51 +235,57 @@ class KnowledgeGraph:
             conn = self._get_conn()
 
             start = time.perf_counter()
-            conn.execute("DELETE FROM relations")
-            conn.execute("DELETE FROM entities")
+            conn.execute("BEGIN")
+            try:
+                conn.execute("DELETE FROM relations")
+                conn.execute("DELETE FROM entities")
 
-            for node_id in self._graph.nodes:
-                entity: GraphEntity = self._graph.nodes[node_id]["entity"]
-                conn.execute(
-                    """INSERT INTO entities
-                       (entity_id, name, entity_type, aliases, first_seen,
-                        last_seen, mention_count, confidence, metadata)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        entity.entity_id,
-                        entity.name,
-                        entity.entity_type.value,
-                        json.dumps(entity.aliases),
-                        _dt_to_iso(entity.first_seen),
-                        _dt_to_iso(entity.last_seen),
-                        entity.mention_count,
-                        entity.confidence,
-                        json.dumps(entity.metadata),
-                    ),
-                )
+                for node_id in self._graph.nodes:
+                    entity: GraphEntity = self._graph.nodes[node_id]["entity"]
+                    conn.execute(
+                        """INSERT INTO entities
+                           (entity_id, name, entity_type, aliases, first_seen,
+                            last_seen, mention_count, confidence, metadata)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            entity.entity_id,
+                            entity.name,
+                            entity.entity_type.value,
+                            json.dumps(entity.aliases),
+                            _dt_to_iso(entity.first_seen),
+                            _dt_to_iso(entity.last_seen),
+                            entity.mention_count,
+                            entity.confidence,
+                            json.dumps(entity.metadata),
+                        ),
+                    )
 
-            for _u, _v, data in self._graph.edges(data=True):
-                relation: GraphRelation = data["relation"]
-                conn.execute(
-                    """INSERT INTO relations
-                       (source_id, target_id, relation_type, weight, confidence,
-                        first_seen, last_seen, date, source_chunk_id, metadata)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        relation.source_id,
-                        relation.target_id,
-                        relation.relation_type.value,
-                        relation.weight,
-                        relation.confidence,
-                        _dt_to_iso(relation.first_seen),
-                        _dt_to_iso(relation.last_seen),
-                        _dt_to_iso(relation.date),
-                        relation.source_chunk_id,
-                        json.dumps(relation.metadata),
-                    ),
-                )
+                for _u, _v, data in self._graph.edges(data=True):
+                    relation: GraphRelation = data["relation"]
+                    conn.execute(
+                        """INSERT INTO relations
+                           (source_id, target_id, relation_type, weight, confidence,
+                            first_seen, last_seen, date, source_chunk_id, metadata)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            relation.source_id,
+                            relation.target_id,
+                            relation.relation_type.value,
+                            relation.weight,
+                            relation.confidence,
+                            _dt_to_iso(relation.first_seen),
+                            _dt_to_iso(relation.last_seen),
+                            _dt_to_iso(relation.date),
+                            relation.source_chunk_id,
+                            json.dumps(relation.metadata),
+                        ),
+                    )
 
-            conn.commit()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
             elapsed_ms = (time.perf_counter() - start) * 1000
             log.info(
                 "graph_saved",

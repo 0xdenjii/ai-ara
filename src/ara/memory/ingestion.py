@@ -25,6 +25,10 @@ from ara.utils.types import MemoryChunk
 
 if TYPE_CHECKING:
     from ara.config.settings import MemorySettings
+    from ara.memory.emotion import EmotionTagger
+    from ara.memory.entity_extractor import EntityExtractor
+    from ara.memory.graph import KnowledgeGraph
+    from ara.memory.temporal import TemporalExtractor
 
 log = get_logger("ingestion")
 
@@ -143,19 +147,42 @@ class IngestionPipeline:
         store: VectorStore,
         manifest_path: Path,
         embedding_batch_size: int = 32,
+        graph: KnowledgeGraph | None = None,
+        entity_extractor: EntityExtractor | None = None,
+        emotion_tagger: EmotionTagger | None = None,
+        temporal_extractor: TemporalExtractor | None = None,
     ) -> None:
         self._chunker = chunker
         self._embedder = embedder
         self._store = store
         self._manifest = IngestionManifest(manifest_path)
         self._embedding_batch_size = embedding_batch_size
+        self._graph = graph
+        self._entity_extractor = entity_extractor
+        self._emotion_tagger = emotion_tagger
+        self._temporal_extractor = temporal_extractor
 
     @classmethod
-    def from_settings(cls, settings: MemorySettings) -> IngestionPipeline:
+    def from_settings(
+        cls,
+        settings: MemorySettings,
+        *,
+        graph: KnowledgeGraph | None = None,
+        entity_extractor: EntityExtractor | None = None,
+        emotion_tagger: EmotionTagger | None = None,
+        temporal_extractor: TemporalExtractor | None = None,
+    ) -> IngestionPipeline:
         """Create a pipeline with default components from settings.
 
         Note: The embedder and store are NOT loaded/connected yet.
         Call initialize() after construction.
+
+        Args:
+            settings: Memory settings for chunker, embedder, and store.
+            graph: Optional knowledge graph for entity storage.
+            entity_extractor: Optional NER extractor for entity extraction.
+            emotion_tagger: Optional emotion tagger for metadata enrichment.
+            temporal_extractor: Optional temporal extractor for metadata enrichment.
         """
         chunker = TextChunker(
             ChunkerConfig(
@@ -172,6 +199,10 @@ class IngestionPipeline:
             embedder=embedder,
             store=store,
             manifest_path=manifest_path,
+            graph=graph,
+            entity_extractor=entity_extractor,
+            emotion_tagger=emotion_tagger,
+            temporal_extractor=temporal_extractor,
         )
 
     def initialize(self) -> None:
@@ -290,11 +321,17 @@ class IngestionPipeline:
         # Chunk
         chunks = self._chunk_file(text, source)
 
+        # Enrich chunk metadata with emotion/temporal data
+        chunks = self._enrich_metadata(chunks)
+
         # Embed
         embedded_chunks = self._embed_chunks(chunks)
 
         # Store
         stored_count = self._store.upsert(embedded_chunks)
+
+        # Extract entities and populate knowledge graph
+        self._extract_and_store_entities(chunks)
 
         # Update manifest
         self._manifest.set_hash(source, file_hash)
@@ -454,11 +491,17 @@ class IngestionPipeline:
             source_file=source_name,
         )
 
+        # Enrich chunk metadata with emotion/temporal data
+        chunks = self._enrich_metadata(chunks)
+
         # Embed
         embedded_chunks = self._embed_chunks(chunks)
 
         # Store
         stored_count = self._store.upsert(embedded_chunks)
+
+        # Extract entities and populate knowledge graph
+        self._extract_and_store_entities(chunks)
 
         # Update manifest
         self._manifest.set_hash(source_name, content_hash)
@@ -523,6 +566,69 @@ class IngestionPipeline:
             )
 
         return embedded
+
+    def _enrich_metadata(self, chunks: list[MemoryChunk]) -> list[MemoryChunk]:
+        """Enrich chunk metadata with emotion and temporal data.
+
+        Creates new MemoryChunk instances with merged metadata (MemoryChunk
+        is frozen, so in-place mutation is avoided). Runs before embedding
+        so enriched metadata is available at storage time. Failures are
+        logged and skipped — enrichment is best-effort and never blocks
+        ingestion.
+
+        Returns:
+            New list of chunks with enriched metadata.
+        """
+        if not self._emotion_tagger and not self._temporal_extractor:
+            return chunks
+
+        from dataclasses import replace
+
+        enriched: list[MemoryChunk] = []
+        for chunk in chunks:
+            try:
+                merged = dict(chunk.metadata)
+                if self._emotion_tagger:
+                    emotion_data = self._emotion_tagger.tag_as_dict(chunk.text)
+                    merged.update(emotion_data)
+                if self._temporal_extractor:
+                    temporal_data = self._temporal_extractor.extract_as_dict(chunk.text)
+                    merged.update(temporal_data)
+                enriched.append(replace(chunk, metadata=merged))
+            except Exception as exc:
+                log.warning(
+                    "metadata_enrichment_failed",
+                    chunk_id=chunk.chunk_id,
+                    error=str(exc),
+                )
+                enriched.append(chunk)
+        return enriched
+
+    def _extract_and_store_entities(self, chunks: list[MemoryChunk]) -> None:
+        """Extract entities from chunks and add them to the knowledge graph.
+
+        Uses the batch extraction API for efficiency. Each extracted entity
+        is added to the graph (or its mention count is incremented if it
+        already exists). Failures are logged and skipped — entity extraction
+        is best-effort and never blocks ingestion.
+        """
+        if not self._entity_extractor or not self._graph:
+            return
+        try:
+            texts = [c.text for c in chunks]
+            results = self._entity_extractor.extract_batch(texts)
+            total_entities = 0
+            for result in results:
+                for entity in result.entities:
+                    self._graph.add_entity(
+                        entity.name,
+                        entity.entity_type,
+                        confidence=entity.confidence,
+                    )
+                    total_entities += 1
+            log.info("entities_extracted", entities=total_entities)
+        except Exception as exc:
+            log.warning("entity_extraction_failed", error=str(exc))
 
     @staticmethod
     def _hash_file(file_path: Path) -> str:

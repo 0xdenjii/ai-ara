@@ -12,6 +12,7 @@ All patterns are designed for English diary-style writing.
 
 from __future__ import annotations
 
+import calendar
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -461,13 +462,17 @@ class TemporalExtractor:
             "last_week": ref - timedelta(weeks=1),
             "this_week": ref,
             "next_week": ref + timedelta(weeks=1),
-            "last_month": ref.replace(month=ref.month - 1)
-            if ref.month > 1
-            else ref.replace(year=ref.year - 1, month=12),
+            "last_month": self._safe_month_replace(
+                ref,
+                ref.month - 1 if ref.month > 1 else 12,
+                ref.year if ref.month > 1 else ref.year - 1,
+            ),
             "this_month": ref,
-            "next_month": ref.replace(month=ref.month + 1)
-            if ref.month < 12
-            else ref.replace(year=ref.year + 1, month=1),
+            "next_month": self._safe_month_replace(
+                ref,
+                ref.month + 1 if ref.month < 12 else 1,
+                ref.year if ref.month < 12 else ref.year + 1,
+            ),
             "last_year": ref.replace(year=ref.year - 1),
             "this_year": ref,
             "next_year": ref.replace(year=ref.year + 1),
@@ -487,7 +492,7 @@ class TemporalExtractor:
             while new_month < 1:
                 new_month += 12
                 new_year -= 1
-            return ref.replace(year=new_year, month=new_month)
+            return self._safe_month_replace(ref, new_month, new_year)
         if unit == "year":
             return ref.replace(year=ref.year - amount)
         return None
@@ -505,7 +510,16 @@ class TemporalExtractor:
             while new_month > 12:
                 new_month -= 12
                 new_year += 1
-            return ref.replace(year=new_year, month=new_month)
+            return self._safe_month_replace(ref, new_month, new_year)
         if unit == "year":
             return ref.replace(year=ref.year + amount)
         return None
+
+    @staticmethod
+    def _safe_month_replace(ref: datetime, month: int, year: int) -> datetime:
+        """Replace month/year on a datetime, clamping the day to the month's max.
+
+        Prevents crashes like March 31 → February 31 (which doesn't exist).
+        """
+        max_day = calendar.monthrange(year, month)[1]
+        return ref.replace(year=year, month=month, day=min(ref.day, max_day))
