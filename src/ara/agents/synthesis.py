@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING
 
 from llama_index.core.response_synthesizers import ResponseMode, get_response_synthesizer
 from llama_index.core.schema import NodeWithScore, TextNode
-from llama_index.llms.ollama import Ollama
 
 from ara.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from llama_index.core.llms import LLM
+
     from ara.config.settings import AraSettings
     from ara.utils.types import RetrievalContext, RetrievalResult
 
@@ -111,7 +112,7 @@ class ResponseSynthesis:
 
     def __init__(self, settings: AraSettings) -> None:
         self._settings = settings
-        self._llm: Ollama | None = None
+        self._llm: LLM | None = None
         self._connected = False
 
     @property
@@ -120,23 +121,49 @@ class ResponseSynthesis:
         return self._connected
 
     async def connect(self) -> None:
-        """Initialize the LlamaIndex Ollama LLM adapter.
+        """Initialize the LlamaIndex LLM adapter for the configured backend.
 
-        This creates a connection to the same Ollama instance used by
-        the main LLM client, reusing the same model.
+        Supports both ``ollama`` and ``llamacpp`` backends. For ollama it
+        uses the native LlamaIndex Ollama adapter; for llamacpp it uses the
+        OpenAI adapter pointed at the local llama.cpp server (which exposes
+        an OpenAI-compatible API).
         """
-        self._llm = Ollama(
-            model=self._settings.llm.primary_model,
-            base_url=self._settings.llm.ollama_base_url,
-            temperature=self._settings.llm.temperature,
-            request_timeout=120.0,
-        )
+        backend = self._settings.llm.backend_type.lower()
+        timeout_s = float(self._settings.llm.ollama_generation_timeout_s)
+
+        if backend == "llamacpp":
+            from llama_index.llms.openai import OpenAI
+
+            self._llm = OpenAI(
+                model=self._settings.llm.primary_model,
+                api_base=self._settings.llm.llamacpp_base_url,
+                api_key="not-needed",
+                temperature=self._settings.llm.temperature,
+                timeout=timeout_s,
+            )
+            log.info(
+                "synthesis_connected",
+                backend="llamacpp",
+                model=self._settings.llm.primary_model,
+                base_url=self._settings.llm.llamacpp_base_url,
+            )
+        else:
+            from llama_index.llms.ollama import Ollama
+
+            self._llm = Ollama(
+                model=self._settings.llm.primary_model,
+                base_url=self._settings.llm.ollama_base_url,
+                temperature=self._settings.llm.temperature,
+                request_timeout=timeout_s,
+            )
+            log.info(
+                "synthesis_connected",
+                backend="ollama",
+                model=self._settings.llm.primary_model,
+                base_url=self._settings.llm.ollama_base_url,
+            )
+
         self._connected = True
-        log.info(
-            "synthesis_connected",
-            model=self._settings.llm.primary_model,
-            base_url=self._settings.llm.ollama_base_url,
-        )
 
     async def close(self) -> None:
         """Clean up resources."""

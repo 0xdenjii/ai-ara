@@ -335,6 +335,11 @@ class IntentRouter:
         """
         cleaned = raw_response.strip()
 
+        # Strip think blocks (Qwen3.5 may emit <think>...</think> reasoning)
+        cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
+        # Also strip unclosed think blocks
+        cleaned = re.sub(r"<think>.*", "", cleaned, flags=re.DOTALL)
+
         # Strip markdown code fences if present
         cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```\s*$", "", cleaned)

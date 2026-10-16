@@ -251,12 +251,12 @@ class MemoryAgent(BaseAgent):
                     results = self._graph.search_entities(word, limit=3)
                     entity_results.extend(results)
 
-            # Deduplicate by entity_id
+            # Deduplicate by entity_id (GraphEntity is a dataclass, not a dict)
             seen_ids: set[str] = set()
-            unique: list[dict[str, object]] = []
+            unique = []
             for ent in entity_results:
-                eid = str(ent.get("entity_id", ""))
-                if eid not in seen_ids:
+                eid = getattr(ent, "entity_id", "") or ""
+                if eid and eid not in seen_ids:
                     seen_ids.add(eid)
                     unique.append(ent)
             entity_results = unique[:_MAX_ENTITY_RESULTS]
@@ -269,14 +269,18 @@ class MemoryAgent(BaseAgent):
         total_chars = 0
 
         for entity in entity_results:
-            entity_id = str(entity.get("entity_id", ""))
-            entity_name = str(entity.get("name", ""))
-            entity_type = str(entity.get("entity_type", ""))
+            # GraphEntity is a dataclass — use attribute access
+            entity_id = getattr(entity, "entity_id", "") or ""
+            entity_name = getattr(entity, "name", "") or ""
+            entity_type_val = getattr(entity, "entity_type", "")
+            entity_type = (
+                entity_type_val.value if hasattr(entity_type_val, "value") else str(entity_type_val)
+            )
 
             if not entity_id:
                 continue
 
-            # Get full entity context from graph
+            # Get full entity context from graph (returns a formatted string)
             entity_context = self._graph.get_entity_context(entity_id)
             if not entity_context:
                 continue
@@ -284,15 +288,21 @@ class MemoryAgent(BaseAgent):
             # Format entity info
             part = f"Entity: {entity_name} ({entity_type})\n"
 
-            # Add neighbors/relationships
-            neighbors = entity_context.get("neighbors", [])
-            if neighbors:
-                rel_lines: list[str] = []
-                for neighbor in neighbors[:8]:  # Limit relationships per entity
-                    rel_type = neighbor.get("relation_type", "related_to")
-                    target_name = neighbor.get("name", "?")
-                    rel_lines.append(f"  - {rel_type} → {target_name}")
-                part += "Relationships:\n" + "\n".join(rel_lines) + "\n"
+            # get_entity_context returns a string — append it directly
+            if isinstance(entity_context, str):
+                part += entity_context + "\n"
+            else:
+                # Fallback for dict-like returns
+                neighbors = (
+                    entity_context.get("neighbors", []) if isinstance(entity_context, dict) else []
+                )
+                if neighbors:
+                    rel_lines: list[str] = []
+                    for neighbor in neighbors[:8]:
+                        rel_type = neighbor.get("relation_type", "related_to")
+                        target_name = neighbor.get("name", "?")
+                        rel_lines.append(f"  - {rel_type} → {target_name}")
+                    part += "Relationships:\n" + "\n".join(rel_lines) + "\n"
 
             # Check total context size
             if total_chars + len(part) > _MAX_GRAPH_CONTEXT_CHARS:

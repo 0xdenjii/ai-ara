@@ -136,7 +136,7 @@ def create_initial_state(
         metadata={},
         steps=0,
         max_steps=max_steps,
-        should_continue=True,
+        should_continue=False,
     )
 
 

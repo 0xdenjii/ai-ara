@@ -290,9 +290,24 @@ class _OllamaBackend:
     ) -> AsyncIterator[str]:
         target_model = model or self._active_model
         temp = temperature if temperature is not None else self._settings.llm.temperature
-        max_tok = max_tokens or self._settings.llm.max_response_tokens
+        max_tok = max_tokens if max_tokens is not None else self._settings.llm.max_response_tokens
+        timeout_s = self._settings.llm.ollama_generation_timeout_s
 
         ollama_messages = [{"role": msg.role.value, "content": msg.content} for msg in messages]
+
+        # Append /no_think to the last user message to disable Qwen3.5's
+        # extended reasoning mode. Without this, the model wastes all output
+        # tokens on a <think> block and produces no actual response when the
+        # system prompt is long (e.g. with RAG context).
+        for i in range(len(ollama_messages) - 1, -1, -1):
+            if ollama_messages[i]["role"] == "user":
+                content = ollama_messages[i]["content"]
+                if "/no_think" not in content:
+                    ollama_messages[i] = {
+                        **ollama_messages[i],
+                        "content": f"{content} /no_think",
+                    }
+                break
 
         start_time = time.monotonic()
         tokens_generated = 0
@@ -310,6 +325,17 @@ class _OllamaBackend:
             )
 
             async for chunk in stream:
+                # Check generation timeout
+                elapsed = time.monotonic() - start_time
+                if elapsed > timeout_s:
+                    from ara.utils.errors import LLMTimeoutError
+
+                    raise LLMTimeoutError(
+                        model=target_model,
+                        timeout_s=timeout_s,
+                        tokens_generated=tokens_generated,
+                    )
+
                 token = chunk.message.content
                 if token:
                     tokens_generated += 1
@@ -378,10 +404,10 @@ class _OllamaBackend:
                     f"Model '{target_model}' not found. Available: {available}",
                 )
 
-            # Pre-load the model by sending an empty generate request
+            # Pre-load the model by sending a minimal generate request
             await self._client.chat(
                 model=target_model,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[{"role": "system", "content": ""}],
                 options={
                     "num_predict": 1,
                     "num_ctx": ctx,

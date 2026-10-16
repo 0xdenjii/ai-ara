@@ -139,11 +139,11 @@ MODELS: dict[ModelRole, ModelSpec] = {
     ),
     ModelRole.RERANKER: ModelSpec(
         role=ModelRole.RERANKER,
-        name="bge-reranker-v2-m3",
+        name="ms-marco-MiniLM-L-12-v2",
         location=ModelLocation.CPU,
         vram_gb=0,
-        ram_mb=1100,
-        description="Cross-encoder reranker, +8-11% retrieval accuracy.",
+        ram_mb=34,
+        description="FlashRank ONNX reranker, ~100ms/query. ~100x faster than bge-reranker-v2-m3.",
         license="Apache-2.0",
     ),
     ModelRole.VISION_ALWAYS_ON: ModelSpec(

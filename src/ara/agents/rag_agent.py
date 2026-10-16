@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from ara.agents.base import AgentCapability, AgentPermission, BaseAgent
 from ara.core.prompts import build_system_prompt
 from ara.utils.logging import get_logger
-from ara.utils.types import ChatMessage, IntentType, MessageRole
+from ara.utils.types import ChatMessage, IntentType, MessageRole, RetrievalContext
 
 if TYPE_CHECKING:
     from ara.agents.state import AgentState
@@ -136,7 +136,17 @@ class RAGAgent(BaseAgent):
             # Fall through to direct LLM generation
             retrieval_context = None
 
-        # Step 2: Decide whether to use retrieved context or go direct
+        # Step 2: Filter by minimum relevance score, then decide
+        if retrieval_context is not None:
+            filtered = [r for r in retrieval_context.results if r.score >= _MIN_RELEVANCE_SCORE]
+            retrieval_context = RetrievalContext(
+                results=filtered,
+                query=retrieval_context.query,
+                query_type=retrieval_context.query_type,
+                total_candidates=retrieval_context.total_candidates,
+                retrieval_time_ms=retrieval_context.retrieval_time_ms,
+            )
+
         has_relevant_context = (
             retrieval_context is not None
             and len(retrieval_context.results) >= _DIRECT_LLM_THRESHOLD
@@ -144,7 +154,11 @@ class RAGAgent(BaseAgent):
 
         memory_context = ""
         if has_relevant_context and retrieval_context is not None:
-            memory_context = self._retrieval.assemble_context(retrieval_context.results)
+            # Cap context to ~2K chars to prevent Qwen3.5 from getting stuck
+            # in extended reasoning loops when the system prompt is too long.
+            memory_context = self._retrieval.assemble_context(
+                retrieval_context.results, max_chars=2000
+            )
 
         # Step 3: Build system prompt with personality + context
         system_prompt = build_system_prompt(
@@ -154,27 +168,12 @@ class RAGAgent(BaseAgent):
         )
 
         # Step 4: Generate response
-        if has_relevant_context and self._synthesizer is not None and retrieval_context is not None:
-            # Use LlamaIndex synthesis for context-aware responses
-            try:
-                synthesis_result = await self._synthesizer.synthesize(
-                    query,
-                    retrieval_context,
-                    system_prompt=system_prompt,
-                )
-                response = synthesis_result.answer
-                synthesis_mode = synthesis_result.mode.value
-            except Exception as exc:
-                log.warning(
-                    "synthesis_failed_fallback_to_direct",
-                    error=str(exc),
-                )
-                response = await self._direct_generate(query, system_prompt, state)
-                synthesis_mode = "direct_fallback"
-        else:
-            # Direct LLM generation (no relevant context or no synthesizer)
-            response = await self._direct_generate(query, system_prompt, state)
-            synthesis_mode = "direct"
+        # Direct LLM generation with memory context injected in system prompt.
+        # This is simpler and more reliable than LlamaIndex synthesis, which
+        # routes context through separate node objects that may not reach the
+        # Ollama adapter properly for all model architectures.
+        response = await self._direct_generate(query, system_prompt, state)
+        synthesis_mode = "direct" if not has_relevant_context else "direct_with_context"
 
         # Step 5: Build retrieval results for state
         retrieval_dicts: list[dict[str, object]] = []

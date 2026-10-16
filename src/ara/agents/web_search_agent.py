@@ -165,8 +165,13 @@ class WebSearchAgent(BaseAgent):
             elapsed_ms=round(search_time_ms, 1),
         )
 
-        # Step 3: Synthesize response from search results
-        response = await self._synthesize_response(query, results[:_MAX_SYNTHESIS_RESULTS])
+        # Step 3: Synthesize response from search results (include conversation history)
+        history = state.get("conversation_history", [])
+        response = await self._synthesize_response(
+            query,
+            results[:_MAX_SYNTHESIS_RESULTS],
+            history=history,
+        )
 
         # Step 4: Build metadata
         result_dicts = [
@@ -215,20 +220,26 @@ class WebSearchAgent(BaseAgent):
             List of WebSearchResult objects.
         """
         try:
-            from duckduckgo_search import DDGS
-        except ImportError as exc:
-            raise OfflineError("search") from exc
+            from ddgs import DDGS
+        except ImportError:
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError as exc:
+                raise OfflineError("search") from exc
 
         results: list[WebSearchResult] = []
 
         # duckduckgo-search is sync, run in executor to avoid blocking
         import asyncio
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync_search() -> list[dict[str, str]]:
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=_MAX_SEARCH_RESULTS))
+            # Note: Do NOT use `with DDGS() as ddgs:` — the context manager
+            # silently breaks when called from asyncio.run_in_executor(),
+            # returning 0 results. Direct instantiation works correctly.
+            ddgs = DDGS()
+            return list(ddgs.text(query, max_results=_MAX_SEARCH_RESULTS))
 
         raw_results = await loop.run_in_executor(None, _sync_search)
 
@@ -250,12 +261,15 @@ class WebSearchAgent(BaseAgent):
         self,
         query: str,
         results: list[WebSearchResult],
+        *,
+        history: list[ChatMessage] | None = None,
     ) -> str:
         """Synthesize a natural language response from search results.
 
         Args:
             query: Original user query.
             results: Search results to synthesize from.
+            history: Optional conversation history for follow-up context.
 
         Returns:
             Synthesized response text with citations.
@@ -266,12 +280,17 @@ class WebSearchAgent(BaseAgent):
             context_parts.append(f"[{i}] {r.title}\n    URL: {r.url}\n    {r.snippet}")
         context = "\n\n".join(context_parts)
 
-        messages = [
+        messages: list[ChatMessage] = [
             ChatMessage(role=MessageRole.SYSTEM, content=_SEARCH_SYNTHESIS_PROMPT),
+        ]
+        # Include recent conversation history for follow-up context
+        if history:
+            messages.extend(history[-4:])
+        messages.append(
             ChatMessage(
                 role=MessageRole.USER,
                 content=f"Search results:\n\n{context}\n\nUser question: {query}",
             ),
-        ]
+        )
 
         return await self._llm.generate(messages, max_tokens=800)

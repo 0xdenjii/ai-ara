@@ -20,7 +20,7 @@ class LLMSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ARA_", **_ENV_FILE_OPTS)
 
-    backend_type: str = "ollama"  # "ollama" or "llamacpp"
+    backend_type: str = "llamacpp"  # "llamacpp" (production) or "ollama" (dev only)
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
     primary_model: str = "qwen3.5:35b"
@@ -59,6 +59,7 @@ class LLMSettings(BaseSettings):
     llamacpp_port: int = 8080
     llamacpp_generation_timeout_s: float = 300.0  # Timeout for generation requests (5 min)
     llamacpp_health_timeout_s: float = 10.0  # Timeout for health/connectivity checks
+    ollama_generation_timeout_s: float = 300.0  # Timeout for Ollama generation requests (5 min)
 
 
 class AudioSettings(BaseSettings):
@@ -126,7 +127,12 @@ class MemorySettings(BaseSettings):
     vector_db_path: Path = Path("./data/vector_db")
     graph_db_path: Path = Path("./data/graph_db/graph.sqlite")
     embedding_model: str = "nomic-ai/nomic-embed-text-v1.5"
-    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_backend: str = (
+        "flashrank"  # "flashrank" (fast, ~100ms) or "cross-encoder" (slow, ~16s)
+    )
+    reranker_model: str = (
+        "ms-marco-MiniLM-L-12-v2"  # FlashRank default; "BAAI/bge-reranker-v2-m3" for cross-encoder
+    )
     chunk_size: int = 512
     chunk_overlap: int = 64
     retrieval_top_k: int = 20
@@ -194,7 +200,7 @@ class APISettings(BaseSettings):
 
     host: str = "127.0.0.1"
     port: int = 8000
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
 class DesktopSettings(BaseSettings):
@@ -361,6 +367,18 @@ class AraSettings(BaseSettings):
         return Path(v).resolve()
 
 
+_cached_settings: AraSettings | None = None
+
+
 def get_settings() -> AraSettings:
-    """Create and return application settings. Reads from .env file and env vars."""
-    return AraSettings()
+    """Return cached application settings. Reads from .env file and env vars on first call."""
+    global _cached_settings
+    if _cached_settings is None:
+        _cached_settings = AraSettings()
+    return _cached_settings
+
+
+def reset_settings() -> None:
+    """Reset cached settings (for testing)."""
+    global _cached_settings
+    _cached_settings = None

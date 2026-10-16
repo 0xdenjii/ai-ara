@@ -210,16 +210,21 @@ class LlamaCppClient:
         """
         target_model = model or self._active_model
         temp = temperature if temperature is not None else self._settings.llm.temperature
-        max_tok = max_tokens or self._settings.llm.max_response_tokens
+        max_tok = max_tokens if max_tokens is not None else self._settings.llm.max_response_tokens
 
         openai_messages = [{"role": msg.role.value, "content": msg.content} for msg in messages]
 
-        request_body = {
+        request_body: dict[str, object] = {
             "model": target_model,
             "messages": openai_messages,
             "temperature": temp,
             "max_tokens": max_tok,
             "stream": True,
+            # Disable Qwen3.5's extended reasoning mode via jinja template.
+            # Without this, the model wastes all output tokens on a <think>
+            # block and produces no actual response when the system prompt
+            # is long (e.g. with RAG context).
+            "chat_template_kwargs": {"enable_thinking": False},
         }
 
         start_time = time.monotonic()
@@ -494,8 +499,8 @@ def build_server_args(
     if llm.llamacpp_threads > 0:
         args.extend(["--threads", str(llm.llamacpp_threads)])
 
-    if llm.llamacpp_flash_attn:
-        args.append("--flash-attn")
+    # --flash-attn requires explicit value in llama.cpp b8263+
+    args.extend(["--flash-attn", "on" if llm.llamacpp_flash_attn else "off"])
 
     # KV cache quantization (reduces VRAM usage for KV cache, q8_0 is ~lossless)
     if llm.llamacpp_kv_cache_type_k != "f16":

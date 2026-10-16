@@ -322,7 +322,7 @@ class ResearchAgent(BaseAgent):
                 page_content = ""
                 if self._browse is not None:
                     try:
-                        page_content = await self._browse._fetch_page(url)
+                        page_content = await self._browse.fetch_page(url)
                     except Exception as exc:
                         log.warning("research_page_fetch_failed", url=url, error=str(exc))
                         page_content = snippet  # Fallback to snippet

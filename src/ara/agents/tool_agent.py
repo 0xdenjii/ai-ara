@@ -153,8 +153,17 @@ class ToolAgent(BaseAgent):
         if not query.strip():
             return {"response": "", "error": "Empty query"}  # type: ignore[return-value]
 
-        # Step 1: Generate tool calls via LLM
-        tool_calls = await self._generate_tool_calls(query)
+        # Check if this is a confirmation follow-up for a pending tool execution
+        history = state.get("conversation_history", [])
+        pending_calls = self._check_pending_confirmation(query, history)
+        user_confirmed = pending_calls is not None
+
+        if user_confirmed:
+            # User confirmed — execute the pending tool calls directly (skip confirmation check)
+            tool_calls = pending_calls  # type: ignore[assignment]
+        else:
+            # Step 1: Generate tool calls via LLM
+            tool_calls = await self._generate_tool_calls(query, history)
 
         if not tool_calls:
             return {  # type: ignore[return-value]
@@ -174,21 +183,28 @@ class ToolAgent(BaseAgent):
                 "tool_results": [],
             }
 
-        # Step 3: Check confirmation requirements (use registry risk levels if available)
-        needs_confirmation = self._check_needs_confirmation(tool_calls)
+        # Step 3: Check confirmation requirements (skip if user already confirmed)
+        if not user_confirmed:
+            needs_confirmation = self._check_needs_confirmation(tool_calls)
+            # DANGEROUS tools always require confirmation regardless of settings
+            has_dangerous = self._has_dangerous_tools(tool_calls)
 
-        if needs_confirmation and self._settings.desktop.require_confirmation:
-            # Format confirmation message
-            actions = [f"- {tc.tool_name}: {json.dumps(tc.parameters)}" for tc in tool_calls]
-            confirm_msg = (
-                "I need to perform these actions:\n" + "\n".join(actions) + "\n\nShall I go ahead?"
-            )
-            return {  # type: ignore[return-value]
-                "response": confirm_msg,
-                "tool_calls": [tool_call_to_dict(tc) for tc in tool_calls],
-                "tool_results": [],
-                "metadata": {"awaiting_confirmation": True},
-            }
+            if has_dangerous or (
+                needs_confirmation and self._settings.desktop.require_confirmation
+            ):
+                # Format confirmation message
+                actions = [f"- {tc.tool_name}: {json.dumps(tc.parameters)}" for tc in tool_calls]
+                confirm_msg = (
+                    "I need to perform these actions:\n"
+                    + "\n".join(actions)
+                    + "\n\nShall I go ahead?"
+                )
+                return {  # type: ignore[return-value]
+                    "response": confirm_msg,
+                    "tool_calls": [tool_call_to_dict(tc) for tc in tool_calls],
+                    "tool_results": [],
+                    "metadata": {"awaiting_confirmation": True},
+                }
 
         # Step 4: Execute tool calls (if executor available)
         tool_results: list[ToolResult] = []
@@ -210,13 +226,13 @@ class ToolAgent(BaseAgent):
                         )
                     )
         else:
-            # No executor yet (Phase 6) — return calls for orchestrator
+            # No executor configured — report failure
             tool_results.extend(
                 ToolResult(
                     call_id=tc.call_id,
                     tool_name=tc.tool_name,
-                    success=True,
-                    output=f"Tool '{tc.tool_name}' queued for execution",
+                    success=False,
+                    output="Desktop tools are not configured. Cannot execute tool actions.",
                 )
                 for tc in tool_calls
             )
@@ -229,6 +245,32 @@ class ToolAgent(BaseAgent):
             "tool_calls": [tool_call_to_dict(tc) for tc in tool_calls],
             "tool_results": [tool_result_to_dict(tr) for tr in tool_results],
         }
+
+    def _has_dangerous_tools(self, tool_calls: list[ToolCall]) -> bool:
+        """Check if any tool call targets a DANGEROUS risk-level tool.
+
+        DANGEROUS tools always require confirmation regardless of user settings,
+        preventing prompt injection from bypassing the safety gate.
+
+        Args:
+            tool_calls: List of tool calls to check.
+
+        Returns:
+            True if at least one call targets a DANGEROUS tool.
+        """
+        _legacy_dangerous = frozenset({"run_command", "file_write", "close_application"})
+
+        for tc in tool_calls:
+            if self._registry is not None:
+                tool = self._registry.get_tool(tc.tool_name)
+                if tool is not None:
+                    from ara.tools.registry import ToolRiskLevel
+
+                    if tool.schema.risk_level == ToolRiskLevel.DANGEROUS:
+                        return True
+            elif tc.tool_name in _legacy_dangerous:
+                return True
+        return False
 
     def _check_needs_confirmation(self, tool_calls: list[ToolCall]) -> bool:
         """Check if any tool call requires user confirmation.
@@ -257,14 +299,106 @@ class ToolAgent(BaseAgent):
                 return True
         return False
 
-    async def _generate_tool_calls(self, query: str) -> list[ToolCall]:
+    def _check_pending_confirmation(
+        self,
+        query: str,
+        history: list[ChatMessage],
+    ) -> list[ToolCall] | None:
+        """Check if the user is confirming a pending tool execution.
+
+        Looks at the last assistant message in history for an "awaiting_confirmation"
+        pattern (tool call listing with "Shall I go ahead?"), and checks if the
+        current query is affirmative.
+
+        Args:
+            query: Current user message.
+            history: Conversation history.
+
+        Returns:
+            List of pending ToolCalls if this is a confirmation, None otherwise.
+        """
+        if not history:
+            return None
+
+        # Check if query is an affirmative confirmation
+        affirmatives = {
+            "yes",
+            "yeah",
+            "yep",
+            "yup",
+            "sure",
+            "go ahead",
+            "go for it",
+            "do it",
+            "proceed",
+            "confirm",
+            "ok",
+            "okay",
+            "y",
+            "absolutely",
+            "please",
+            "please do",
+            "yes please",
+            "go",
+            "execute",
+        }
+        normalized = query.strip().lower().rstrip("!.")
+        if normalized not in affirmatives:
+            return None
+
+        # Find the last assistant message and check if it contained tool confirmation
+        for msg in reversed(history):
+            if msg.role == MessageRole.ASSISTANT:
+                content = msg.content
+                if "Shall I go ahead?" in content and "I need to perform these actions:" in content:
+                    # Extract tool calls from the confirmation message
+                    return self._parse_confirmation_message(content)
+                break  # Only check the most recent assistant message
+
+        return None
+
+    def _parse_confirmation_message(self, message: str) -> list[ToolCall]:
+        """Parse tool calls from a confirmation prompt message.
+
+        The confirmation message format is:
+            I need to perform these actions:
+            - tool_name: {"param": "value"}
+            Shall I go ahead?
+
+        Args:
+            message: The confirmation message text.
+
+        Returns:
+            List of ToolCall objects extracted from the message.
+        """
+        calls: list[ToolCall] = []
+        for line in message.split("\n"):
+            line = line.strip()
+            if line.startswith("- ") and ": " in line[2:]:
+                parts = line[2:].split(": ", 1)
+                tool_name = parts[0].strip()
+                try:
+                    parameters = json.loads(parts[1]) if len(parts) > 1 else {}
+                except (json.JSONDecodeError, IndexError):
+                    parameters = {}
+                if tool_name:
+                    calls.append(ToolCall(tool_name=tool_name, parameters=parameters))
+        return calls
+
+    async def _generate_tool_calls(
+        self,
+        query: str,
+        history: list[ChatMessage] | None = None,
+    ) -> list[ToolCall]:
         """Use LLM to generate structured tool calls from a natural language request.
 
         Generates the tool prompt dynamically from the registry if available,
-        otherwise uses the fallback static tool list.
+        otherwise uses the fallback static tool list. Includes recent conversation
+        history for follow-up context.
 
         Args:
             query: The user's request.
+            history: Optional conversation history for context.
 
         Returns:
             List of ToolCall objects.
@@ -276,10 +410,13 @@ class ToolAgent(BaseAgent):
 
         prompt = _TOOL_GENERATION_PROMPT_TEMPLATE.format(tool_list=tool_list)
 
-        messages = [
+        messages: list[ChatMessage] = [
             ChatMessage(role=MessageRole.SYSTEM, content=prompt),
-            ChatMessage(role=MessageRole.USER, content=query),
         ]
+        # Include recent history for follow-up tool commands
+        if history:
+            messages.extend(history[-4:])
+        messages.append(ChatMessage(role=MessageRole.USER, content=query))
 
         raw = await self._llm.generate(messages, temperature=0.1, max_tokens=500)
         return self._parse_tool_calls(raw)

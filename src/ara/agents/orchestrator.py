@@ -24,6 +24,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,10 @@ from ara.agents.state import AgentState, create_initial_state
 from ara.utils.errors import AgentError, RoutingError
 from ara.utils.logging import get_logger
 from ara.utils.types import ChatMessage, IntentType
+
+# Default timeout for individual agent execution (seconds).
+# Set high to accommodate CPU reranking (~16s) + LLM reasoning (~60-90s).
+_DEFAULT_AGENT_TIMEOUT_S = 300
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -139,10 +144,14 @@ class Orchestrator:
 
         start = time.perf_counter()
 
-        # Manage context window
+        # Manage context window — reset summary when conversation changes
         managed_history = conversation_history or []
-        if self._context_manager and managed_history:
-            managed_history = await self._context_manager.prepare_context(managed_history)
+        if self._context_manager:
+            if conversation_id != getattr(self, "_last_conversation_id", ""):
+                self._context_manager.reset()
+                self._last_conversation_id = conversation_id
+            if managed_history:
+                managed_history = await self._context_manager.prepare_context(managed_history)
 
         # Create initial state
         state = create_initial_state(
@@ -290,9 +299,11 @@ class Orchestrator:
         agent_name = state.get("agent", "")
         current_steps = state.get("steps", 0)
 
+        timeout_s = getattr(self._settings, "agent_timeout_s", _DEFAULT_AGENT_TIMEOUT_S)
+
         try:
             agent = self._registry.get(agent_name)
-            result = await agent.execute(state)
+            result = await asyncio.wait_for(agent.execute(state), timeout=timeout_s)
 
             # Increment step counter
             new_steps = current_steps + 1
@@ -301,6 +312,16 @@ class Orchestrator:
 
             return result_dict
 
+        except TimeoutError:
+            log.error(
+                "agent_execution_timeout",
+                agent=agent_name,
+                timeout_s=timeout_s,
+            )
+            return {
+                "error": f"Agent '{agent_name}' timed out after {timeout_s}s",
+                "should_continue": False,
+            }
         except RoutingError as exc:
             log.error("agent_not_found", agent=agent_name, error=str(exc))
             return {
@@ -396,7 +417,8 @@ class Orchestrator:
 
         should_continue = state.get("should_continue", False)
         steps = state.get("steps", 0)
-        max_steps = state.get("max_steps", 5)
+        # Clamp max_steps to prevent agents from overriding to a large value
+        max_steps = min(state.get("max_steps", 5), 10)
 
         if should_continue and steps < max_steps:
             return "continue"

@@ -147,7 +147,7 @@ class WebBrowseAgent(BaseAgent):
 
         for url in urls[:3]:  # Limit to 3 URLs max
             try:
-                content = await self._fetch_page(url)
+                content = await self.fetch_page(url)
                 page_contents.append({"url": url, "content": content})
             except Exception as exc:
                 log.warning("page_fetch_failed", url=url, error=str(exc))
@@ -211,7 +211,7 @@ class WebBrowseAgent(BaseAgent):
         except (json.JSONDecodeError, AttributeError):
             return [], "none"
 
-    async def _fetch_page(self, url: str) -> str:
+    async def fetch_page(self, url: str) -> str:
         """Fetch and extract clean text from a web page.
 
         Args:
