@@ -26,9 +26,9 @@ from ara.fine_tuning.train import (
 class TestLoRAConfig:
     def test_default_values(self) -> None:
         config = LoRAConfig()
-        assert config.rank == 16
+        assert config.rank == 32
         assert config.alpha == 32
-        assert config.dropout == 0.05
+        assert config.dropout == 0.0
         assert "q_proj" in config.target_modules
         assert "k_proj" in config.target_modules
         assert "v_proj" in config.target_modules
@@ -39,14 +39,14 @@ class TestLoRAConfig:
         assert len(config.target_modules) == 7
 
     def test_custom_values(self) -> None:
-        config = LoRAConfig(rank=32, alpha=64, use_dora=True)
-        assert config.rank == 32
+        config = LoRAConfig(rank=64, alpha=64, use_dora=True)
+        assert config.rank == 64
         assert config.alpha == 64
         assert config.use_dora is True
 
     def test_use_rslora_default(self) -> None:
         config = LoRAConfig()
-        assert config.use_rslora is True
+        assert config.use_rslora is False
 
 
 # ── Training Config ─────────────────────────────────────────────────────────
@@ -55,13 +55,14 @@ class TestLoRAConfig:
 class TestTrainingConfig:
     def test_default_values(self) -> None:
         config = TrainingConfig()
-        assert config.base_model == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
-        assert config.max_seq_length == 4096
-        assert config.load_in_4bit is True
-        assert config.num_epochs == 3
-        assert config.batch_size == 2
+        assert config.base_model == "unsloth/Qwen3.5-35B-A3B"
+        assert config.max_seq_length == 2048
+        assert config.load_in_4bit is False
+        assert config.load_in_16bit is True
+        assert config.num_epochs == 2
+        assert config.batch_size == 1
         assert config.gradient_accumulation_steps == 4
-        assert config.learning_rate == 2e-4
+        assert config.learning_rate == 1e-4
         assert config.gradient_checkpointing is True
         assert config.bf16 is True
         assert config.seed == 42
@@ -69,17 +70,18 @@ class TestTrainingConfig:
     def test_effective_batch_size(self) -> None:
         config = TrainingConfig()
         effective = config.batch_size * config.gradient_accumulation_steps
-        assert effective == 8
+        assert effective == 4
 
     def test_to_dict(self) -> None:
         config = TrainingConfig()
         data = config.to_dict()
-        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
-        assert data["lora_rank"] == 16
+        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B"
+        assert data["lora_rank"] == 32
         assert data["lora_alpha"] == 32
-        assert data["effective_batch_size"] == 8
-        assert data["learning_rate"] == 2e-4
+        assert data["effective_batch_size"] == 4
+        assert data["learning_rate"] == 1e-4
         assert data["seed"] == 42
+        assert data["load_in_16bit"] is True
 
     def test_to_dict_includes_all_keys(self) -> None:
         config = TrainingConfig()
@@ -88,6 +90,7 @@ class TestTrainingConfig:
             "base_model",
             "max_seq_length",
             "load_in_4bit",
+            "load_in_16bit",
             "lora_rank",
             "lora_alpha",
             "lora_dropout",
@@ -131,7 +134,7 @@ class TestSaveLoadConfig:
         save_config(config, output)
         assert output.exists()
         data = json.loads(output.read_text(encoding="utf-8"))
-        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B-bnb-4bit"
+        assert data["base_model"] == "unsloth/Qwen3.5-35B-A3B"
 
     def test_save_creates_directories(self, tmp_path: Path) -> None:
         config = TrainingConfig()
@@ -140,13 +143,14 @@ class TestSaveLoadConfig:
         assert output.exists()
 
     def test_load_config(self, tmp_path: Path) -> None:
-        config = TrainingConfig(num_epochs=5, learning_rate=1e-4)
+        config = TrainingConfig(num_epochs=5, learning_rate=5e-5)
         output = tmp_path / "config.json"
         save_config(config, output)
         loaded = load_training_config(output)
         assert loaded.num_epochs == 5
-        assert loaded.learning_rate == 1e-4
-        assert loaded.lora.rank == 16
+        assert loaded.learning_rate == 5e-5
+        assert loaded.lora.rank == 32
+        assert loaded.load_in_16bit is True
 
     def test_load_missing_file(self) -> None:
         with pytest.raises(FileNotFoundError):

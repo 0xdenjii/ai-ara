@@ -941,7 +941,7 @@ class TestSystemTools:
         assert _is_command_allowed("Get-Process") is True
         assert _is_command_allowed("ipconfig /all") is True
         assert _is_command_allowed("git status") is True
-        assert _is_command_allowed("echo hello") is True
+        assert _is_command_allowed("hostname") is True
 
     def test_command_whitelist_blocked(self) -> None:
         from ara.tools.system import _is_command_allowed
@@ -977,7 +977,7 @@ class TestSystemTools:
         mock_process.returncode = 0
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
-            result = await tool.execute({"command": "echo hello"})
+            result = await tool.execute({"command": "hostname"})
             assert "test output" in result
 
     @pytest.mark.asyncio
@@ -1020,12 +1020,18 @@ class TestSystemTools:
         assert "95 more lines" in result
 
     @pytest.mark.asyncio
-    async def test_file_read_not_found(self, settings: AraSettings) -> None:
+    async def test_file_read_not_found_in_allowed_dir(
+        self, settings: AraSettings, tmp_path: Path
+    ) -> None:
+        from pathlib import Path as _Path
+
         from ara.tools.system import FileReadTool
 
         tool = FileReadTool(settings)
+        # Use a path inside user home that doesn't exist
+        missing = _Path.home() / "ara_test_nonexistent_file_xyz.txt"
         with pytest.raises(DesktopError, match="File not found"):
-            await tool.execute({"path": "C:/nonexistent/file.txt"})
+            await tool.execute({"path": str(missing)})
 
     @pytest.mark.asyncio
     async def test_file_read_too_large(self, settings: AraSettings, tmp_path: Path) -> None:

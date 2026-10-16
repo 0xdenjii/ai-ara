@@ -27,7 +27,7 @@ class TestAraSettings:
         settings = AraSettings()
         assert settings.llm.primary_model == "qwen3.5:35b"
         assert settings.llm.temperature == 0.7
-        assert settings.llm.max_response_tokens == 4096
+        assert settings.llm.max_response_tokens == 8192
 
     def test_voice_defaults(self) -> None:
         settings = AraSettings()

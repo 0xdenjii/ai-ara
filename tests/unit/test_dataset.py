@@ -10,15 +10,19 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ara.fine_tuning.dataset import (
+    CATEGORY_WEIGHTS,
     GENERAL_TOPICS,
     HUMOR_DISTRIBUTION,
     ChatMLMessage,
     ConversationType,
     DiarySegment,
     HumorLevel,
+    SegmentCategory,
     TrainingSample,
     build_generation_prompt,
     build_system_message_for_training,
+    build_weighted_segment_pool,
+    classify_segment_path,
     compute_stats,
     count_conversation_tokens,
     count_tokens,
@@ -28,6 +32,7 @@ from ara.fine_tuning.dataset import (
     generate_knowledge_qa,
     generate_personality_conversation,
     get_humor_level_for_index,
+    get_segment_category_stats,
     get_target_counts,
     load_dataset,
     parse_diary_file,
@@ -227,6 +232,233 @@ class TestParseDiaryFile:
         for seg in segments:
             assert len(seg.segment_id) == 16
             assert seg.token_count > 0
+
+
+class TestOversizedParagraphSplitting:
+    """Tests for splitting paragraphs that exceed MAX_TURN_TOKENS."""
+
+    def test_large_file_without_dates_splits_properly(self, tmp_path: Path) -> None:
+        """A large file without date headers should be split into many segments."""
+        # Create content large enough to require splitting (> MAX_TURN_TOKENS = 1024)
+        content = "This is a substantial paragraph. " * 500  # ~2000 tokens in one paragraph
+        diary_file = tmp_path / "big_note.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        # Should be split into multiple segments, each <= ~1024 tokens
+        assert len(segments) >= 2
+        for seg in segments:
+            assert seg.token_count <= 1100  # Allow small overhead from rejoining
+
+    def test_oversized_paragraph_split_at_newlines(self, tmp_path: Path) -> None:
+        """A paragraph with single newlines should split at those boundaries."""
+        # Build a single paragraph (no double newlines) with single newlines
+        lines = [f"Line number {i} with enough content to be meaningful. " * 5 for i in range(100)]
+        content = "\n".join(lines)
+        diary_file = tmp_path / "newline_note.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        assert len(segments) >= 2
+        for seg in segments:
+            assert seg.token_count <= 1100
+
+    def test_oversized_paragraph_split_at_sentences(self, tmp_path: Path) -> None:
+        """A single long line should split at sentence boundaries."""
+        # One very long line with sentence boundaries (no newlines at all)
+        content = "This is sentence number one. " * 300  # ~1500 tokens, one long line
+        diary_file = tmp_path / "sentence_note.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        assert len(segments) >= 2
+        for seg in segments:
+            assert seg.token_count <= 1100
+
+    def test_hard_split_no_boundaries(self, tmp_path: Path) -> None:
+        """Content with no sentence/newline boundaries should be hard-split by tokens."""
+        # One very long word-like string with no boundaries
+        content = "word " * 3000  # ~3000 tokens, no periods or newlines
+        diary_file = tmp_path / "hard_split_note.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        assert len(segments) >= 2
+        for seg in segments:
+            assert seg.token_count <= 1100
+
+    def test_mixed_normal_and_oversized_paragraphs(self, tmp_path: Path) -> None:
+        """Normal paragraphs should stay intact, oversized ones should be split."""
+        small_para = "A normal-sized paragraph with moderate content. " * 10  # ~50 tokens
+        big_para = "This is a huge paragraph. " * 500  # ~2000 tokens
+        content = f"{small_para}\n\n{big_para}\n\n{small_para}"
+        diary_file = tmp_path / "mixed_note.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        assert len(segments) >= 3  # small + split big + small
+        for seg in segments:
+            assert seg.token_count <= 1100
+
+    def test_segment_metadata_preserved_after_split(self, tmp_path: Path) -> None:
+        """Split segments should retain source file and date metadata."""
+        content = "## 2024-06-15\n" + "Long content under a date header. " * 500
+        diary_file = tmp_path / "dated_big.md"
+        diary_file.write_text(content, encoding="utf-8")
+
+        segments = parse_diary_file(diary_file)
+        assert len(segments) >= 2
+        for seg in segments:
+            assert seg.source_file == "dated_big.md"
+            assert seg.date == "2024-06-15"
+            assert seg.segment_id
+            assert len(seg.segment_id) == 16
+            assert seg.category == SegmentCategory.OTHER  # No diary_root → defaults to OTHER
+            assert seg.source_path == "dated_big.md"
+
+
+class TestClassifySegmentPath:
+    """Tests for path-based content classification."""
+
+    def test_journal_is_personal(self) -> None:
+        path = "2023-2025/aaaa0001-bd54-411e/diary_entry.md"
+        assert classify_segment_path(path) == SegmentCategory.PERSONAL
+
+    def test_story_of_our_life_is_personal(self) -> None:
+        path = "2020-2021/story of our life .md"
+        assert classify_segment_path(path) == SegmentCategory.PERSONAL
+
+    def test_nikhils_vengence_is_personal(self) -> None:
+        path = "2020-2021/NIKHIL'S VENGENCE.md"
+        assert classify_segment_path(path) == SegmentCategory.PERSONAL
+
+    def test_2020_raw_diary_is_personal(self) -> None:
+        path = "2020-2021/some_entry.md"
+        assert classify_segment_path(path) == SegmentCategory.PERSONAL
+
+    def test_life_notes_is_knowledge(self) -> None:
+        path = "2023-2025/aaaa0004-9f9f-47d2/study_notes.md"
+        assert classify_segment_path(path) == SegmentCategory.KNOWLEDGE
+
+    def test_12_docx_is_other(self) -> None:
+        path = "2020-2021/12.docx.md"
+        assert classify_segment_path(path) == SegmentCategory.OTHER
+
+    def test_misc_is_other(self) -> None:
+        path = "2023-2025/aaaa0005-8c7f-422f/misc.md"
+        assert classify_segment_path(path) == SegmentCategory.OTHER
+
+    def test_archive_is_other(self) -> None:
+        path = "2023-2025/aaaa0003-2f7f-4636/archive.md"
+        assert classify_segment_path(path) == SegmentCategory.OTHER
+
+    def test_unknown_path_is_other(self) -> None:
+        path = "some/random/path.md"
+        assert classify_segment_path(path) == SegmentCategory.OTHER
+
+    def test_case_insensitive(self) -> None:
+        path = "2023-2025/AAAA0001-upper/diary.md"
+        assert classify_segment_path(path) == SegmentCategory.PERSONAL
+
+
+class TestWeightedSampling:
+    """Tests for the weighted segment pool builder."""
+
+    def _make_segment(self, category: SegmentCategory, idx: int) -> DiarySegment:
+        text = f"Segment {idx} content for testing."
+        return DiarySegment(
+            text=text,
+            source_file=f"test_{idx}.md",
+            source_path=f"test_{idx}.md",
+            date="",
+            section_title="",
+            token_count=len(text.split()) * 2,
+            segment_id=DiarySegment.compute_id(text, f"test_{idx}.md"),
+            category=category,
+        )
+
+    def test_personal_segments_weighted_5x(self) -> None:
+        segments = [self._make_segment(SegmentCategory.PERSONAL, i) for i in range(10)]
+        pool = build_weighted_segment_pool(segments, target_samples=50)
+        assert len(pool) == 50
+        # All should be personal (since only personal segments exist)
+        assert all(s.category == SegmentCategory.PERSONAL for s in pool)
+
+    def test_mixed_categories_weighted(self) -> None:
+        personal = [self._make_segment(SegmentCategory.PERSONAL, i) for i in range(10)]
+        knowledge = [self._make_segment(SegmentCategory.KNOWLEDGE, i + 10) for i in range(10)]
+        other = [self._make_segment(SegmentCategory.OTHER, i + 20) for i in range(10)]
+        all_segs = personal + knowledge + other
+
+        pool = build_weighted_segment_pool(all_segs, target_samples=1000)
+        assert len(pool) == 1000
+
+        # Count categories in pool
+        from collections import Counter
+
+        cats = Counter(s.category for s in pool)
+        # Personal: 10 segments * 5 weight = 50 in expanded pool
+        # Knowledge: 10 segments * 3 weight = 30 in expanded pool
+        # Other: 10 segments * 1 weight = 10 in expanded pool
+        # Total expanded: 90 items, cycled to 1000
+        # Ratio should be ~50/90 personal, ~30/90 knowledge, ~10/90 other
+        assert cats[SegmentCategory.PERSONAL] > cats[SegmentCategory.KNOWLEDGE]
+        assert cats[SegmentCategory.KNOWLEDGE] > cats[SegmentCategory.OTHER]
+
+    def test_target_larger_than_pool_cycles(self) -> None:
+        segments = [self._make_segment(SegmentCategory.PERSONAL, 0)]
+        pool = build_weighted_segment_pool(segments, target_samples=20)
+        assert len(pool) == 20
+
+    def test_target_smaller_than_pool_truncates(self) -> None:
+        segments = [self._make_segment(SegmentCategory.PERSONAL, i) for i in range(100)]
+        pool = build_weighted_segment_pool(segments, target_samples=10)
+        assert len(pool) == 10
+
+    def test_deterministic(self) -> None:
+        segments = [self._make_segment(SegmentCategory.PERSONAL, i) for i in range(20)]
+        pool1 = build_weighted_segment_pool(segments, target_samples=50)
+        pool2 = build_weighted_segment_pool(segments, target_samples=50)
+        assert [s.segment_id for s in pool1] == [s.segment_id for s in pool2]
+
+
+class TestSegmentCategoryStats:
+    def test_category_stats(self) -> None:
+        def _seg(cat: SegmentCategory, idx: int) -> DiarySegment:
+            text = f"content {idx}"
+            return DiarySegment(
+                text=text,
+                source_file=f"f{idx}.md",
+                source_path=f"f{idx}.md",
+                date="",
+                section_title="",
+                token_count=10,
+                segment_id=f"id{idx}",
+                category=cat,
+            )
+
+        segments = [
+            _seg(SegmentCategory.PERSONAL, 0),
+            _seg(SegmentCategory.PERSONAL, 1),
+            _seg(SegmentCategory.KNOWLEDGE, 2),
+            _seg(SegmentCategory.OTHER, 3),
+        ]
+        stats = get_segment_category_stats(segments)
+        assert stats["personal"] == 2
+        assert stats["knowledge"] == 1
+        assert stats["other"] == 1
+
+
+class TestCategoryWeights:
+    def test_all_categories_have_weights(self) -> None:
+        for cat in SegmentCategory:
+            assert cat in CATEGORY_WEIGHTS
+
+    def test_personal_highest_weight(self) -> None:
+        assert (
+            CATEGORY_WEIGHTS[SegmentCategory.PERSONAL] > CATEGORY_WEIGHTS[SegmentCategory.KNOWLEDGE]
+        )
+        assert CATEGORY_WEIGHTS[SegmentCategory.KNOWLEDGE] > CATEGORY_WEIGHTS[SegmentCategory.OTHER]
 
 
 class TestScanDiaryDirectory:
@@ -488,10 +720,12 @@ class TestGeneratePersonalityConversation:
         return DiarySegment(
             text="Today I went to the gym for the first time in months. Felt great but also slightly dead.",
             source_file="diary.md",
+            source_path="diary.md",
             date="2024-01-15",
             section_title="",
             token_count=30,
             segment_id="abc123",
+            category=SegmentCategory.PERSONAL,
         )
 
     @pytest.fixture()
@@ -532,10 +766,12 @@ class TestGenerateKnowledgeQA:
         return DiarySegment(
             text="Started learning Rust this week. It's hard but the compiler errors are actually helpful.",
             source_file="diary.md",
+            source_path="diary.md",
             date="2024-02-01",
             section_title="",
             token_count=25,
             segment_id="def456",
+            category=SegmentCategory.KNOWLEDGE,
         )
 
     @pytest.mark.asyncio

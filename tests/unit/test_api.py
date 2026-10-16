@@ -285,9 +285,9 @@ class TestChatEndpoint:
         mock_app_state.llm_client.is_connected = False
 
         resp = client.post("/api/chat", json={"message": "Hello"})
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = resp.json()
-        assert data["error"] != ""
+        assert "not connected" in data["detail"].lower()
 
     def test_chat_with_history(self, client: TestClient, mock_app_state: AppState) -> None:
         mock_app_state.llm_client.generate = AsyncMock(return_value="Follow up response")
@@ -644,6 +644,150 @@ class TestThinkBlockFilter:
             result += tbf.process(token)
         result += tbf.flush()
         assert result.strip() == "Hello!"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Graph Endpoint Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGraphEndpoint:
+    """Knowledge graph route tests."""
+
+    def test_graph_stats_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/stats")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entity_count"] == 0
+        assert data["relation_count"] == 0
+
+    def test_graph_search_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/search", params={"query": "test"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entities"] == []
+        assert data["query"] == "test"
+
+    def test_graph_entity_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/entity/fake-id")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["found"] is False
+
+    def test_graph_neighbors_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/entity/fake-id/neighbors")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entity_id"] == "fake-id"
+        assert data["neighbors"] == []
+
+    def test_graph_relations_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/entity/fake-id/relations")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entity_id"] == "fake-id"
+        assert data["relations"] == []
+
+    def test_graph_communities_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/communities")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["communities"] == []
+        assert data["total_communities"] == 0
+
+    def test_graph_subgraph_no_graph(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/subgraph", params={"entity_ids": "id1,id2"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["entities"] == []
+        assert data["relations"] == []
+
+    def test_graph_search_empty_query(self, client: TestClient) -> None:
+        resp = client.get("/api/graph/search", params={"query": ""})
+        # Empty query is allowed — returns all entities (limited)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "entities" in data
+        assert data["query"] == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Vision Endpoint Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVisionEndpoint:
+    """Vision route tests."""
+
+    def test_vision_status_no_pipeline(self, client: TestClient) -> None:
+        resp = client.get("/api/vision/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is False
+
+    def test_vision_analyze_no_pipeline(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/vision/analyze",
+            files={"file": ("test.jpg", b"fake-image-data", "image/jpeg")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "not initialized" in data["error"]
+
+    def test_vision_analyze_bad_mime_type(
+        self, client: TestClient, mock_app_state: AppState
+    ) -> None:
+        mock_app_state.vision_pipeline = MagicMock()
+        resp = client.post(
+            "/api/vision/analyze",
+            files={"file": ("test.exe", b"not-image", "application/octet-stream")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "Unsupported file type" in data["error"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Memory Ingest Endpoint Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMemoryIngestEndpoint:
+    """Memory ingestion route tests."""
+
+    def test_ingest_no_pipeline(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/memory/ingest",
+            files={"file": ("test.md", b"# Hello World", "text/markdown")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "not initialized" in data["error"]
+
+    def test_ingest_bad_extension(self, client: TestClient, mock_app_state: AppState) -> None:
+        mock_app_state.ingestion_pipeline = MagicMock()
+        resp = client.post(
+            "/api/memory/ingest",
+            files={"file": ("test.exe", b"data", "application/octet-stream")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "Unsupported file type" in data["error"]
+
+    def test_ingest_empty_file(self, client: TestClient, mock_app_state: AppState) -> None:
+        mock_app_state.ingestion_pipeline = MagicMock()
+        resp = client.post(
+            "/api/memory/ingest",
+            files={"file": ("test.md", b"   ", "text/markdown")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert "empty" in data["error"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -632,12 +632,14 @@ class TestBuildServerArgs:
     def test_flash_attention_enabled(self) -> None:
         s = AraSettings(_env_file=None, llm={"llamacpp_flash_attn": True})
         args = build_server_args(s, "/models/model.gguf")
-        assert "--flash-attn" in args
+        idx = args.index("--flash-attn")
+        assert args[idx + 1] == "on"
 
     def test_flash_attention_disabled(self) -> None:
         s = AraSettings(_env_file=None, llm={"llamacpp_flash_attn": False})
         args = build_server_args(s, "/models/model.gguf")
-        assert "--flash-attn" not in args
+        idx = args.index("--flash-attn")
+        assert args[idx + 1] == "off"
 
     def test_custom_threads(self) -> None:
         s = AraSettings(_env_file=None, llm={"llamacpp_threads": 12})

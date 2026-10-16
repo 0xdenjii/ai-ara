@@ -131,7 +131,7 @@ class TestCreateInitialState:
         assert state["error"] == ""
         assert state["steps"] == 0
         assert state["max_steps"] == 5
-        assert state["should_continue"] is True
+        assert state["should_continue"] is False
 
     def test_with_conversation_id(self):
         state = create_initial_state("hello", conversation_id="conv123")
@@ -694,15 +694,14 @@ class TestMemoryAgent:
     async def test_builds_graph_context(self, mock_llm, mock_settings, mock_retrieval):
         from ara.agents.memory_agent import MemoryAgent
 
+        mock_entity = MagicMock()
+        mock_entity.entity_id = "e1"
+        mock_entity.name = "Mom"
+        mock_entity.entity_type = "person"
+
         mock_graph = MagicMock()
-        mock_graph.search_entities.return_value = [
-            {"entity_id": "e1", "name": "Mom", "entity_type": "person"}
-        ]
-        mock_graph.get_entity_context.return_value = {
-            "neighbors": [
-                {"relation_type": "interacted_with", "name": "Dad"},
-            ]
-        }
+        mock_graph.search_entities.return_value = [mock_entity]
+        mock_graph.get_entity_context.return_value = "Mom is connected to Dad via interacted_with"
         mock_llm.generate.return_value = "memory response"
 
         agent = MemoryAgent(mock_settings, mock_llm, mock_retrieval, graph=mock_graph)
