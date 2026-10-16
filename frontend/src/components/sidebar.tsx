@@ -31,7 +31,7 @@ export function SidebarNav() {
   useEffect(() => {
     const checkConnection = async () => {
       try {
-        const res = await fetch("http://localhost:8000/health", {
+        const res = await fetch("/health", {
           method: "GET",
           signal: AbortSignal.timeout(3000),
         });

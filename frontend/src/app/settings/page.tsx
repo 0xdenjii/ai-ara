@@ -21,6 +21,7 @@ import {
   Skull,
   Save,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   Card,
   CardContent,
@@ -206,8 +207,10 @@ export default function SettingsPage() {
           setSettings((prev) =>
             prev ? { ...prev, internet: result } : prev,
           );
-        } catch {
-          // silently fail on debounced save
+        } catch (err) {
+          toast.error(
+            `Failed to save internet settings: ${err instanceof Error ? err.message : "Unknown error"}`,
+          );
         }
       }, 600);
     },
@@ -226,8 +229,10 @@ export default function SettingsPage() {
         const v = await fetchVoiceStatus();
         setVoice(v);
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      toast.error(
+        `Voice action failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
     } finally {
       setVoiceLoading(false);
     }

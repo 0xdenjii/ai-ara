@@ -118,7 +118,7 @@ export default function ChatPage() {
   const isEmpty = messages.length === 0;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full overflow-hidden">
       {/* ---- Conversation Sidebar ---- */}
       <AnimatePresence mode="wait">
         {sidebarOpen && (
@@ -138,7 +138,7 @@ export default function ChatPage() {
       </AnimatePresence>
 
       {/* ---- Main Chat Area ---- */}
-      <div className="relative flex flex-1 flex-col overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {/* Top bar with sidebar toggle */}
         <div className="flex h-12 items-center gap-2 border-b border-border/30 px-3">
           <Button
@@ -168,7 +168,7 @@ export default function ChatPage() {
         </div>
 
         {/* Messages area */}
-        <ScrollArea className="flex-1">
+        <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto w-full max-w-3xl">
             {isEmpty ? (
               /* ---- Empty state ---- */

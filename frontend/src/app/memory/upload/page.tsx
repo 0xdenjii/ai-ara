@@ -17,6 +17,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
+import { ingestFile, type IngestResponse } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,6 +29,7 @@ interface SelectedFile {
   progress: number;
   status: "pending" | "uploading" | "done" | "error";
   error?: string;
+  result?: IngestResponse;
 }
 
 interface RejectedFile {
@@ -78,6 +80,7 @@ export default function DiaryUploadPage() {
   const [ingesting, setIngesting] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [totalChunks, setTotalChunks] = useState(0);
 
   // ---- Dropzone ------------------------------------------------------------
 
@@ -124,75 +127,98 @@ export default function DiaryUploadPage() {
     setRejections((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
-  // ---- Simulated ingestion -------------------------------------------------
+  // ---- Real ingestion via API ----------------------------------------------
 
-  const startIngestion = useCallback(() => {
+  const startIngestion = useCallback(async () => {
     if (files.length === 0 || ingesting) return;
 
     setIngesting(true);
     setCompleted(false);
     setCurrentIndex(0);
+    setTotalChunks(0);
 
     // Reset all files to pending / 0
     setFiles((prev) =>
-      prev.map((f) => ({ ...f, progress: 0, status: "pending" as const })),
+      prev.map((f) => ({
+        ...f,
+        progress: 0,
+        status: "pending" as const,
+        error: undefined,
+        result: undefined,
+      })),
     );
 
-    // Simulate sequential processing
-    const totalFiles = files.length;
+    // Process files sequentially — the backend accepts one file at a time
+    let chunksTotal = 0;
 
-    function processFile(index: number) {
-      if (index >= totalFiles) {
-        setIngesting(false);
-        setCompleted(true);
-        return;
-      }
+    for (let i = 0; i < files.length; i++) {
+      setCurrentIndex(i);
 
-      setCurrentIndex(index);
+      // Mark current file as uploading
       setFiles((prev) =>
-        prev.map((f, i) =>
-          i === index ? { ...f, status: "uploading" as const } : f,
+        prev.map((f, idx) =>
+          idx === i ? { ...f, status: "uploading" as const, progress: 10 } : f,
         ),
       );
 
-      // Simulate progress increments
-      let progress = 0;
-      const interval = setInterval(() => {
-        progress += Math.random() * 20 + 10;
-        if (progress >= 100) {
-          progress = 100;
-          clearInterval(interval);
-          setFiles((prev) =>
-            prev.map((f, i) =>
-              i === index
-                ? { ...f, progress: 100, status: "done" as const }
-                : f,
-            ),
-          );
-          // Next file after a short pause
-          setTimeout(() => processFile(index + 1), 300);
-        } else {
-          setFiles((prev) =>
-            prev.map((f, i) =>
-              i === index ? { ...f, progress: Math.min(progress, 99) } : f,
-            ),
-          );
-        }
-      }, 200);
+      try {
+        // Upload to backend
+        const result = await ingestFile(files[i].file);
+
+        chunksTotal += result.chunks_created;
+        setTotalChunks(chunksTotal);
+
+        // Mark as done with result
+        setFiles((prev) =>
+          prev.map((f, idx) =>
+            idx === i
+              ? {
+                  ...f,
+                  progress: 100,
+                  status: "done" as const,
+                  result,
+                }
+              : f,
+          ),
+        );
+      } catch (err) {
+        // Mark as error
+        const message =
+          err instanceof Error ? err.message : "Upload failed";
+        setFiles((prev) =>
+          prev.map((f, idx) =>
+            idx === i
+              ? {
+                  ...f,
+                  progress: 0,
+                  status: "error" as const,
+                  error: message,
+                }
+              : f,
+          ),
+        );
+      }
     }
 
-    processFile(0);
+    setIngesting(false);
+    setCompleted(true);
   }, [files, ingesting]);
 
   // ---- Derived state -------------------------------------------------------
 
   const totalSize = files.reduce((sum, f) => sum + f.file.size, 0);
+  const doneCount = files.filter((f) => f.status === "done").length;
+  const errorCount = files.filter((f) => f.status === "error").length;
+  const hasPendingFiles = files.some((f) => f.status === "pending");
+
   const overallProgress =
     files.length > 0
-      ? Math.round(files.reduce((sum, f) => sum + f.progress, 0) / files.length)
+      ? Math.round(
+          (files.filter((f) => f.status === "done" || f.status === "error").length /
+            files.length) *
+            100,
+        )
       : 0;
-  const doneCount = files.filter((f) => f.status === "done").length;
-  const hasPendingFiles = files.some((f) => f.status === "pending");
 
   return (
     <div className="flex h-full flex-col">
@@ -301,6 +327,8 @@ export default function DiaryUploadPage() {
                       <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
                         {f.status === "done" ? (
                           <CheckCircle className="size-4 text-emerald-400" />
+                        ) : f.status === "error" ? (
+                          <AlertCircle className="size-4 text-red-400" />
                         ) : f.status === "uploading" ? (
                           <Loader2 className="size-4 animate-spin text-indigo-400" />
                         ) : (
@@ -323,6 +351,20 @@ export default function DiaryUploadPage() {
                         </div>
                         <p className="text-[10px] text-muted-foreground">
                           {formatSize(f.file.size)}
+                          {f.result && (
+                            <span className="ml-2 text-emerald-400/80">
+                              {f.result.chunks_created} chunks created,{" "}
+                              {f.result.chunks_embedded} embedded
+                              {f.result.elapsed_ms
+                                ? ` (${(f.result.elapsed_ms / 1000).toFixed(1)}s)`
+                                : ""}
+                            </span>
+                          )}
+                          {f.error && (
+                            <span className="ml-2 text-red-400/80">
+                              {f.error}
+                            </span>
+                          )}
                         </p>
 
                         {/* Per-file progress bar (during ingestion) */}
@@ -363,7 +405,7 @@ export default function DiaryUploadPage() {
               <CardContent className="space-y-3 py-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-medium text-foreground/80">
-                    Processing file {currentIndex + 1} of {files.length}...
+                    Uploading file {currentIndex + 1} of {files.length}...
                   </span>
                   <span className="text-xs font-mono text-muted-foreground">
                     {overallProgress}%
@@ -379,18 +421,64 @@ export default function DiaryUploadPage() {
 
           {/* Completion state */}
           {completed && !ingesting && (
-            <Card className="border-emerald-500/20 bg-emerald-500/5">
+            <Card
+              className={cn(
+                errorCount > 0 && doneCount === 0
+                  ? "border-red-500/20 bg-red-500/5"
+                  : errorCount > 0
+                    ? "border-amber-500/20 bg-amber-500/5"
+                    : "border-emerald-500/20 bg-emerald-500/5",
+              )}
+            >
               <CardContent className="flex items-center gap-3 py-4">
-                <div className="flex size-10 items-center justify-center rounded-full bg-emerald-500/20">
-                  <CheckCircle className="size-5 text-emerald-400" />
+                <div
+                  className={cn(
+                    "flex size-10 items-center justify-center rounded-full",
+                    errorCount > 0 && doneCount === 0
+                      ? "bg-red-500/20"
+                      : errorCount > 0
+                        ? "bg-amber-500/20"
+                        : "bg-emerald-500/20",
+                  )}
+                >
+                  {errorCount > 0 && doneCount === 0 ? (
+                    <AlertCircle className="size-5 text-red-400" />
+                  ) : (
+                    <CheckCircle
+                      className={cn(
+                        "size-5",
+                        errorCount > 0 ? "text-amber-400" : "text-emerald-400",
+                      )}
+                    />
+                  )}
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-emerald-300">
+                  <p
+                    className={cn(
+                      "text-sm font-medium",
+                      errorCount > 0 && doneCount === 0
+                        ? "text-red-300"
+                        : errorCount > 0
+                          ? "text-amber-300"
+                          : "text-emerald-300",
+                    )}
+                  >
                     {doneCount} file{doneCount !== 1 ? "s" : ""} ingested
-                    successfully
+                    {errorCount > 0 && `, ${errorCount} failed`}
                   </p>
-                  <p className="text-xs text-emerald-400/60">
-                    Your diary entries are now searchable in memory.
+                  <p
+                    className={cn(
+                      "text-xs",
+                      errorCount > 0 && doneCount === 0
+                        ? "text-red-400/60"
+                        : errorCount > 0
+                          ? "text-amber-400/60"
+                          : "text-emerald-400/60",
+                    )}
+                  >
+                    {doneCount > 0
+                      ? `${totalChunks} total chunks created. Your diary entries are now searchable in memory.`
+                      : "No files were successfully ingested. Check the backend connection."}
                   </p>
                 </div>
               </CardContent>
@@ -434,6 +522,7 @@ export default function DiaryUploadPage() {
                   setRejections([]);
                   setCompleted(false);
                   setCurrentIndex(0);
+                  setTotalChunks(0);
                 }}
               >
                 Upload More

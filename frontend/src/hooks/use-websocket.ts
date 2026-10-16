@@ -3,7 +3,17 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import type { WSMessage, WSResponse } from "@/types/api";
 
-const WS_URL = "ws://127.0.0.1:8000/ws";
+// WebSocket connections cannot be proxied through Next.js rewrites, so we
+// connect directly to the backend.  Use NEXT_PUBLIC_WS_URL for explicit
+// override, or derive from NEXT_PUBLIC_API_URL, falling back to the default
+// backend address.  In production the reverse proxy handles WS natively.
+const WS_URL = (() => {
+  if (process.env.NEXT_PUBLIC_WS_URL) {
+    return process.env.NEXT_PUBLIC_WS_URL;
+  }
+  const base = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  return base.replace(/^http/, "ws") + "/ws";
+})();
 const PING_INTERVAL_MS = 30_000;
 const DEFAULT_RECONNECT_MS = 3_000;
 

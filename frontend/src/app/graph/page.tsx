@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -14,10 +14,17 @@ import {
   useEdgesState,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Network, Info } from "lucide-react";
+import { Network, Info, Loader2 } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import {
+  fetchGraphStats,
+  searchGraphEntities,
+  fetchGraphSubgraph,
+  type GraphEntity,
+  type GraphRelation,
+} from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Node type colors
@@ -52,8 +59,10 @@ const TYPE_STYLES: Record<string, { border: string; bg: string; badge: string }>
 };
 
 function getTypeStyle(type: string) {
+  // Normalize: capitalize first letter for matching
+  const normalized = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
   return (
-    TYPE_STYLES[type] ?? {
+    TYPE_STYLES[normalized] ?? {
       border: "border-l-zinc-500",
       bg: "bg-zinc-500/10",
       badge: "bg-zinc-500/20 text-zinc-400 border-zinc-500/30",
@@ -92,10 +101,10 @@ function GraphNode({ data }: NodeProps<Node<GraphNodeData>>) {
 }
 
 // ---------------------------------------------------------------------------
-// Demo data
+// Demo / fallback data
 // ---------------------------------------------------------------------------
 
-const INITIAL_NODES: Node<GraphNodeData>[] = [
+const DEMO_NODES: Node<GraphNodeData>[] = [
   {
     id: "alex",
     type: "graphNode",
@@ -134,7 +143,7 @@ const INITIAL_NODES: Node<GraphNodeData>[] = [
   },
 ];
 
-const INITIAL_EDGES: Edge[] = [
+const DEMO_EDGES: Edge[] = [
   {
     id: "e-alex-work",
     source: "alex",
@@ -205,14 +214,163 @@ const INITIAL_EDGES: Edge[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Helpers: transform API data to ReactFlow format
+// ---------------------------------------------------------------------------
+
+const EDGE_COLORS = [
+  "#6366f1", "#10b981", "#8b5cf6", "#ec4899", "#06b6d4",
+  "#f59e0b", "#ef4444", "#14b8a6", "#f97316", "#84cc16",
+];
+
+function entityToNode(entity: GraphEntity, index: number): Node<GraphNodeData> {
+  // Lay out nodes in a grid-like pattern; fitView will adjust
+  const cols = 4;
+  const col = index % cols;
+  const row = Math.floor(index / cols);
+  const jitterX = (index * 37) % 60 - 30; // slight randomization for visual variety
+  const jitterY = (index * 53) % 60 - 30;
+
+  const typeLabel =
+    entity.entity_type.charAt(0).toUpperCase() +
+    entity.entity_type.slice(1).toLowerCase();
+
+  return {
+    id: entity.entity_id,
+    type: "graphNode",
+    position: { x: col * 280 + jitterX, y: row * 150 + jitterY },
+    data: { label: entity.name, type: typeLabel },
+  };
+}
+
+function relationToEdge(relation: GraphRelation, index: number): Edge {
+  const color = EDGE_COLORS[index % EDGE_COLORS.length];
+  return {
+    id: `e-${relation.source_id}-${relation.target_id}-${index}`,
+    source: relation.source_id,
+    target: relation.target_id,
+    label: relation.relation_type,
+    animated: index === 0,
+    style: { stroke: color },
+    labelStyle: { fill: color, fontSize: 10, fontWeight: 500 },
+    labelBgStyle: { fill: "#18181b", fillOpacity: 0.9 },
+    labelBgPadding: [6, 3] as [number, number],
+    labelBgBorderRadius: 4,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
 export default function GraphPage() {
-  const [nodes, , onNodesChange] = useNodesState(INITIAL_NODES);
-  const [edges, , onEdgesChange] = useEdgesState(INITIAL_EDGES);
+  const [nodes, setNodes, onNodesChange] = useNodesState([] as Node<GraphNodeData>[]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([] as Edge[]);
+  const [loading, setLoading] = useState(true);
+  const [isDemo, setIsDemo] = useState(false);
+  const [stats, setStats] = useState<{ entities: number; relations: number } | null>(null);
 
   const nodeTypes = useMemo(() => ({ graphNode: GraphNode }), []);
+
+  // ---- Fetch real graph data on mount ------------------------------------
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadGraph() {
+      try {
+        // 1. Get stats (also serves as a connectivity check)
+        const graphStats = await fetchGraphStats();
+        if (cancelled) return;
+        setStats({
+          entities: graphStats.entity_count,
+          relations: graphStats.relation_count,
+        });
+
+        // If the graph is empty, fall back to demo
+        if (graphStats.entity_count === 0) {
+          setNodes(DEMO_NODES);
+          setEdges(DEMO_EDGES);
+          setIsDemo(true);
+          setLoading(false);
+          return;
+        }
+
+        // 2. Fetch entities (empty query = all, limited)
+        const searchResult = await searchGraphEntities("", 50);
+        if (cancelled) return;
+
+        const entities = searchResult.entities;
+        if (entities.length === 0) {
+          setNodes(DEMO_NODES);
+          setEdges(DEMO_EDGES);
+          setIsDemo(true);
+          setLoading(false);
+          return;
+        }
+
+        // 3. Build node list from all entities
+        const apiNodes = entities.map(entityToNode);
+
+        // 4. Fetch subgraphs for relations. Query the first few entities to
+        //    gather edges without hammering the backend.
+        const entitiesToQuery = entities.slice(0, Math.min(entities.length, 10));
+        const subgraphPromises = entitiesToQuery.map((e) =>
+          fetchGraphSubgraph(e.entity_id).catch(() => null),
+        );
+        const subgraphs = await Promise.all(subgraphPromises);
+        if (cancelled) return;
+
+        // Collect unique relations
+        const seenEdges = new Set<string>();
+        const allRelations: GraphRelation[] = [];
+        const entityIdSet = new Set(entities.map((e) => e.entity_id));
+
+        for (const sg of subgraphs) {
+          if (!sg) continue;
+          // Also add any entities from subgraphs that we haven't seen
+          for (const ent of sg.entities) {
+            if (!entityIdSet.has(ent.entity_id)) {
+              entityIdSet.add(ent.entity_id);
+              apiNodes.push(entityToNode(ent, apiNodes.length));
+            }
+          }
+          for (const rel of sg.relations) {
+            const key = `${rel.source_id}-${rel.target_id}-${rel.relation_type}`;
+            if (!seenEdges.has(key)) {
+              seenEdges.add(key);
+              allRelations.push(rel);
+            }
+          }
+        }
+
+        // Only keep edges whose source and target exist in our node set
+        const finalEntityIds = new Set(apiNodes.map((n) => n.id));
+        const validRelations = allRelations.filter(
+          (r) => finalEntityIds.has(r.source_id) && finalEntityIds.has(r.target_id),
+        );
+
+        const apiEdges = validRelations.map(relationToEdge);
+
+        setNodes(apiNodes);
+        setEdges(apiEdges);
+        setIsDemo(false);
+        setLoading(false);
+      } catch {
+        // Backend not reachable or error — fall back to demo
+        if (cancelled) return;
+        setNodes(DEMO_NODES);
+        setEdges(DEMO_EDGES);
+        setIsDemo(true);
+        setLoading(false);
+      }
+    }
+
+    loadGraph();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setNodes, setEdges]);
 
   return (
     <div className="flex h-full flex-col">
@@ -225,7 +383,13 @@ export default function GraphPage() {
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Knowledge Graph</h1>
             <p className="text-xs text-muted-foreground">
-              Graph visualization is available when connected to the ARA backend
+              {loading
+                ? "Loading graph data..."
+                : isDemo
+                  ? "Demo visualization — connect to the ARA backend for real data"
+                  : stats
+                    ? `${stats.entities} entities, ${stats.relations} relations`
+                    : "Connected to ARA backend"}
             </p>
           </div>
         </div>
@@ -233,61 +397,76 @@ export default function GraphPage() {
 
       {/* Graph */}
       <div className="relative flex-1">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          nodeTypes={nodeTypes}
-          fitView
-          proOptions={{ hideAttribution: true }}
-          minZoom={0.3}
-          maxZoom={2}
-          className="bg-background"
-        >
-          <Background color="#27272a" gap={20} size={1} />
-          <Controls
-            className="!bg-zinc-900 !border-border/50 !rounded-lg !shadow-lg [&>button]:!bg-zinc-800 [&>button]:!border-border/50 [&>button]:!text-zinc-400 [&>button:hover]:!bg-zinc-700"
-          />
-        </ReactFlow>
+        {loading ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="flex flex-col items-center gap-3">
+              <Loader2 className="size-8 animate-spin text-cyan-400" />
+              <p className="text-sm text-muted-foreground">Loading knowledge graph...</p>
+            </div>
+          </div>
+        ) : (
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            nodeTypes={nodeTypes}
+            fitView
+            proOptions={{ hideAttribution: true }}
+            minZoom={0.3}
+            maxZoom={2}
+            className="bg-background"
+          >
+            <Background color="#27272a" gap={20} size={1} />
+            <Controls
+              className="!bg-zinc-900 !border-border/50 !rounded-lg !shadow-lg [&>button]:!bg-zinc-800 [&>button]:!border-border/50 [&>button]:!text-zinc-400 [&>button:hover]:!bg-zinc-700"
+            />
+          </ReactFlow>
+        )}
 
         {/* Legend */}
-        <div className="absolute bottom-4 left-4 z-10">
-          <Card className="border-border/50 bg-zinc-900/90 backdrop-blur-sm">
-            <CardContent className="py-3 px-4">
-              <div className="flex flex-wrap items-center gap-2">
-                {Object.entries(TYPE_STYLES).map(([type, style]) => (
-                  <Badge
-                    key={type}
-                    variant="outline"
-                    className={`border text-[10px] ${style.badge}`}
-                  >
-                    {type}
-                  </Badge>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        {!loading && (
+          <div className="absolute bottom-4 left-4 z-10">
+            <Card className="border-border/50 bg-zinc-900/90 backdrop-blur-sm">
+              <CardContent className="py-3 px-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  {Object.entries(TYPE_STYLES).map(([type, style]) => (
+                    <Badge
+                      key={type}
+                      variant="outline"
+                      className={`border text-[10px] ${style.badge}`}
+                    >
+                      {type}
+                    </Badge>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
-        {/* Info banner */}
-        <div className="absolute top-4 right-4 z-10">
-          <Card className="border-border/50 bg-zinc-900/90 backdrop-blur-sm max-w-xs">
-            <CardContent className="flex items-start gap-2 py-3 px-4">
-              <Info className="size-4 shrink-0 text-cyan-400 mt-0.5" />
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                This is a demo visualization. Connect to the ARA backend to explore
-                your personal knowledge graph with real entities and relationships.
-              </p>
-            </CardContent>
-          </Card>
-        </div>
+        {/* Info banner — only show for demo mode */}
+        {!loading && isDemo && (
+          <div className="absolute top-4 right-4 z-10">
+            <Card className="border-border/50 bg-zinc-900/90 backdrop-blur-sm max-w-xs">
+              <CardContent className="flex items-start gap-2 py-3 px-4">
+                <Info className="size-4 shrink-0 text-cyan-400 mt-0.5" />
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  This is a demo visualization. Connect to the ARA backend to explore
+                  your personal knowledge graph with real entities and relationships.
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </div>
 
       {/* Footer note */}
       <div className="border-t border-border/50 px-6 py-3">
         <p className="text-center text-xs text-muted-foreground/60">
-          Connect to ARA backend to explore your personal knowledge graph
+          {isDemo
+            ? "Connect to ARA backend to explore your personal knowledge graph"
+            : "Showing live data from your ARA knowledge graph"}
         </p>
       </div>
     </div>

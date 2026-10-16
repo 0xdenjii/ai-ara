@@ -2,9 +2,8 @@
 
 import { useRef, useCallback } from "react";
 import { useAppStore } from "@/lib/store";
+import { API_BASE } from "@/lib/api";
 import type { MessageItem, StreamChunk } from "@/types/api";
-
-const API_BASE = "http://127.0.0.1:8000";
 
 // ---------------------------------------------------------------------------
 // Return type
@@ -27,7 +26,7 @@ async function* streamChat(
   conversationId: string,
   signal: AbortSignal,
 ): AsyncGenerator<StreamChunk> {
-  const response = await fetch(`${API_BASE}/api/chat`, {
+  const response = await fetch(`${API_BASE}/api/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
