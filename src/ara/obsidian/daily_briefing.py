@@ -34,7 +34,9 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ara.utils.types import (
+    ChatMessage,
     DailyNoteData,
+    MessageRole,
     MorningBriefing,
     ObsidianTaskStatus,
 )
@@ -230,11 +232,9 @@ class BriefingGenerator:
         if self._conversations is not None:
             try:
                 recent = self._conversations.get_recent_conversations(limit=20)
-                today_convos = [c for c in recent if c.get("started_at", "").startswith(today_str)]
+                today_convos = [c for c in recent if c.started_at.strftime("%Y-%m-%d") == today_str]
                 conversation_count = len(today_convos)
-                for c in today_convos:
-                    if c.get("topics"):
-                        topics.extend(c["topics"][:3])
+                topics.extend(c.summary for c in today_convos if c.summary)
             except Exception as exc:
                 log.warning("eod_recap_conversation_error", error=str(exc))
 
@@ -420,8 +420,9 @@ class BriefingGenerator:
         )
 
         try:
-            response = await llm_client.generate(prompt)
-            return response.text.strip()
+            messages = [ChatMessage(role=MessageRole.USER, content=prompt)]
+            response = await llm_client.generate(messages)
+            return response.strip()
         except Exception as exc:
             log.warning("morning_briefing_llm_error", error=str(exc))
             return self._generate_template_briefing(
@@ -452,8 +453,9 @@ class BriefingGenerator:
         )
 
         try:
-            response = await llm_client.generate(prompt)
-            return response.text.strip()
+            messages = [ChatMessage(role=MessageRole.USER, content=prompt)]
+            response = await llm_client.generate(messages)
+            return response.strip()
         except Exception as exc:
             log.warning("eod_recap_llm_error", error=str(exc))
             return self._generate_template_eod_recap(

@@ -298,7 +298,7 @@ class DiaryWriter:
                     break
 
             lines.insert(insert_idx, entry)
-            new_content = before + heading + "\n".join(lines)
+            new_content = before + heading + "\n" + "\n".join(lines)
         else:
             # Section doesn't exist — create it at the end
             new_content = content.rstrip() + f"\n\n{heading}\n\n{entry}\n"

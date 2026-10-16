@@ -222,18 +222,21 @@ class WebSearchService:
             WebSearchError: If DuckDuckGo search fails.
         """
         try:
-            from duckduckgo_search import DDGS
-        except ImportError as exc:
-            raise WebSearchError(
-                "duckduckgo-search library not installed",
-                details={"hint": "pip install duckduckgo-search"},
-            ) from exc
+            from ddgs import DDGS
+        except ImportError:
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError as exc:
+                raise WebSearchError(
+                    "ddgs library not installed",
+                    details={"hint": "pip install ddgs"},
+                ) from exc
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync_search() -> list[dict[str, str]]:
-            with DDGS() as ddgs:
-                return list(ddgs.text(query, max_results=max_results, region=region))
+            ddgs = DDGS()
+            return list(ddgs.text(query, max_results=max_results, region=region))
 
         try:
             raw_results = await loop.run_in_executor(None, _sync_search)
@@ -262,17 +265,20 @@ class WebSearchService:
             Normalized news results.
         """
         try:
-            from duckduckgo_search import DDGS
-        except ImportError as exc:
-            raise WebSearchError(
-                "duckduckgo-search library not installed",
-            ) from exc
+            from ddgs import DDGS
+        except ImportError:
+            try:
+                from duckduckgo_search import DDGS
+            except ImportError as exc:
+                raise WebSearchError(
+                    "ddgs library not installed",
+                ) from exc
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync_news() -> list[dict[str, str]]:
-            with DDGS() as ddgs:
-                return list(ddgs.news(query, max_results=max_results, region=region))
+            ddgs = DDGS()
+            return list(ddgs.news(query, max_results=max_results, region=region))
 
         try:
             raw_results = await loop.run_in_executor(None, _sync_news)

@@ -41,6 +41,54 @@ if TYPE_CHECKING:
 log = get_logger("api.ws")
 
 
+async def _load_conversation_history(
+    state: AppState,
+    conversation_id: str,
+    max_turns: int = 10,
+) -> list[ChatMessage]:
+    """Load recent conversation history from the ConversationStore.
+
+    Args:
+        state: Application state with conversation_store.
+        conversation_id: The active conversation to load history for.
+        max_turns: Maximum number of recent turns to include.
+
+    Returns:
+        List of ChatMessage objects representing the conversation history.
+    """
+    if (
+        not conversation_id
+        or not state.conversation_store
+        or not state.conversation_store.is_connected
+    ):
+        return []
+
+    try:
+        loop = asyncio.get_running_loop()
+        conversation = await loop.run_in_executor(
+            None,
+            state.conversation_store.get_conversation,
+            conversation_id,
+        )
+        if not conversation or not conversation.turns:
+            return []
+
+        history: list[ChatMessage] = []
+        # Take the most recent turns
+        recent_turns = conversation.turns[-max_turns:]
+        for turn in recent_turns:
+            if turn.user_message:
+                history.append(ChatMessage(role=MessageRole.USER, content=turn.user_message))
+            if turn.assistant_message:
+                history.append(
+                    ChatMessage(role=MessageRole.ASSISTANT, content=turn.assistant_message)
+                )
+        return history
+    except Exception as exc:
+        log.warning("ws_history_load_failed", error=str(exc))
+        return []
+
+
 async def _handle_chat(
     ws: WebSocket,
     state: AppState,
@@ -48,21 +96,84 @@ async def _handle_chat(
     conversation_id: str,
     cancel_event: asyncio.Event,
 ) -> None:
-    """Handle a chat message over WebSocket — stream tokens back."""
+    """Handle a chat message over WebSocket — stream tokens back.
+
+    Routes through the orchestrator if available, otherwise falls back
+    to direct LLM streaming.
+    """
     if not state.llm_client or not state.llm_client.is_connected:
         resp = WSResponse(type="error", content="LLM is not connected")
         await ws.send_text(resp.model_dump_json())
         return
 
+    # Load conversation history from store for context continuity
+    conversation_history = await _load_conversation_history(state, conversation_id)
+
+    # Try orchestrator first (non-streaming, sends full response)
+    if state.orchestrator:
+        try:
+            result = await state.orchestrator.process(
+                content,
+                conversation_id=conversation_id,
+                conversation_history=conversation_history,
+            )
+            # Persist the turn to conversation store
+            if (
+                result.response
+                and state.conversation_store
+                and state.conversation_store.is_connected
+            ):
+                try:
+                    loop = asyncio.get_running_loop()
+                    if not conversation_id:
+                        conversation_id = await loop.run_in_executor(
+                            None,
+                            state.conversation_store.start_conversation,
+                        )
+                    await loop.run_in_executor(
+                        None,
+                        lambda: state.conversation_store.add_turn(
+                            conversation_id,
+                            user_message=content,
+                            assistant_message=result.response,
+                        ),
+                    )
+                except Exception as exc:
+                    log.warning("ws_conversation_tracking_failed", error=str(exc))
+
+            # Send orchestrator response as a single token + done
+            if result.response:
+                resp = WSResponse(
+                    type="token",
+                    content=result.response,
+                    conversation_id=conversation_id,
+                )
+                await ws.send_text(resp.model_dump_json())
+            done_resp = WSResponse(
+                type="done",
+                conversation_id=conversation_id,
+                metadata={
+                    "intent": result.intent,
+                    "agent": result.agent,
+                    "elapsed_ms": result.elapsed_ms,
+                },
+            )
+            await ws.send_text(done_resp.model_dump_json())
+            return
+        except Exception as exc:
+            log.warning("ws_orchestrator_failed_fallback_to_llm", error=str(exc))
+
+    # Fallback: direct LLM streaming
     try:
         from ara.core.prompts import build_system_message
         from ara.core.streaming import ThinkBlockFilter
 
         system_msg = build_system_message(state.settings.personality)
-        messages = [
-            system_msg,
-            ChatMessage(role=MessageRole.USER, content=content),
-        ]
+        messages: list[ChatMessage] = [system_msg]
+        # Include conversation history in fallback path too
+        if conversation_history:
+            messages.extend(conversation_history[-6:])
+        messages.append(ChatMessage(role=MessageRole.USER, content=content))
 
         think_filter = ThinkBlockFilter()
         token_count = 0
@@ -92,7 +203,10 @@ async def _handle_chat(
 
     except Exception as exc:
         log.error("ws_chat_error", error=str(exc))
-        error_resp = WSResponse(type="error", content=str(exc))
+        # Sanitize error message to prevent leaking internal details to client
+        error_resp = WSResponse(
+            type="error", content="An internal error occurred. Please try again."
+        )
         await ws.send_text(error_resp.model_dump_json())
 
 

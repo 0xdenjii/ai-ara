@@ -67,10 +67,6 @@ _COMMAND_WHITELIST_PREFIXES: tuple[str, ...] = (
     "nslookup",
     "tracert",
     "tasklist",
-    "wmic",
-    "echo",
-    "type",
-    "find",
     "findstr",
     "git status",
     "git log",
@@ -79,10 +75,9 @@ _COMMAND_WHITELIST_PREFIXES: tuple[str, ...] = (
     "git remote",
     "git show",
     "git tag",
-    # Python
+    # Python (read-only commands only)
     "python --version",
     "python -m pip list",
-    "uv run",
     # Node
     "node --version",
     "npm --version",
@@ -105,14 +100,85 @@ _COMMAND_BLACKLIST_PATTERNS: tuple[str, ...] = (
     "bcdedit",
     "diskpart",
     "cipher /w",
+    "invoke-expression",
+    "invoke-webrequest",
+    "start-process",
+    "new-object",
+    "add-type",
+    "set-content",
+    "remove-item",
+    "move-item",
+    "copy-item",
+    "out-file",
+    "set-executionpolicy",
+    "downloadstring",
+    "downloadfile",
+    "iex ",
+    "iwr ",
+)
+
+# Shell operators that enable command chaining/injection.
+# Commands containing any of these are rejected.
+_SHELL_OPERATORS: tuple[str, ...] = (
+    ";",  # statement separator
+    "|",  # pipe
+    "&&",  # conditional AND
+    "||",  # conditional OR
+    "$(",  # subexpression
+    "& ",  # call operator
+    "&{",  # script block call
+    "`",  # backtick escape
+    ">",  # output redirect (file write)
+    "<",  # input redirect
+    ">>",  # append redirect
+    "2>",  # stderr redirect
+    "\n",  # newline injection (second command line)
+    "\r",  # carriage return injection
 )
 
 # Maximum output length from commands (characters)
 _MAX_OUTPUT_LENGTH = 10000
 
 
+def _is_path_allowed(path: Path, settings: AraSettings) -> bool:
+    """Check if a resolved path is within allowed directories.
+
+    Allowed directories are:
+        - The user's home directory (and subdirectories)
+        - The project data directory (and subdirectories)
+
+    Args:
+        path: Resolved (absolute) path to check.
+        settings: Application settings for data_dir lookup.
+
+    Returns:
+        True if the path is within an allowed directory.
+    """
+    resolved = path.resolve()
+    home_dir = Path.home().resolve()
+    data_dir = Path(settings.data_dir).resolve()
+
+    return (
+        resolved in (home_dir, data_dir)
+        or _is_subpath(resolved, home_dir)
+        or _is_subpath(resolved, data_dir)
+    )
+
+
+def _is_subpath(child: Path, parent: Path) -> bool:
+    """Check if child is a sub-path of parent."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def _is_command_allowed(command: str) -> bool:
     """Check if a command is allowed by the whitelist.
+
+    Validates against blacklist, shell operators (injection prevention),
+    and whitelist. All three checks must pass.
 
     Args:
         command: The command string to check.
@@ -125,6 +191,11 @@ def _is_command_allowed(command: str) -> bool:
     # Check blacklist first
     for pattern in _COMMAND_BLACKLIST_PATTERNS:
         if pattern in cmd_lower:
+            return False
+
+    # Block shell operators that enable command injection
+    for op in _SHELL_OPERATORS:
+        if op in command:
             return False
 
     # Check whitelist
@@ -213,6 +284,12 @@ class RunCommandTool(BaseTool):
             return stdout if stdout else "(no output)"
 
         except TimeoutError as exc:
+            # Kill the timed-out process to prevent subprocess leaks
+            try:
+                process.kill()
+                await process.wait()
+            except (ProcessLookupError, OSError):
+                pass  # Process already exited
             raise DesktopError(
                 f"Command timed out after {timeout}s: '{command[:80]}'",
                 operation="run_command",
@@ -252,7 +329,7 @@ class FileReadTool(BaseTool):
                     default=0,
                 ),
             ),
-            risk_level=ToolRiskLevel.SAFE,
+            risk_level=ToolRiskLevel.MODERATE,
             category="system",
         )
 
@@ -260,6 +337,13 @@ class FileReadTool(BaseTool):
         path_str = parameters["path"]
         max_lines = int(parameters.get("lines", 0))
         path = Path(path_str).resolve()
+
+        if not _is_path_allowed(path, self._settings):
+            raise DesktopError(
+                f"Access denied: '{path}' is outside allowed directories (home and data).",
+                operation="file_read",
+                details={"path": str(path)},
+            )
 
         if not path.exists():
             raise DesktopError(
@@ -341,6 +425,13 @@ class FileWriteTool(BaseTool):
         content = parameters["content"]
         append = bool(parameters.get("append", False))
         path = Path(path_str).resolve()
+
+        if not _is_path_allowed(path, self._settings):
+            raise DesktopError(
+                f"Access denied: '{path}' is outside allowed directories (home and data).",
+                operation="file_write",
+                details={"path": str(path)},
+            )
 
         # Create parent directories if needed
         path.parent.mkdir(parents=True, exist_ok=True)

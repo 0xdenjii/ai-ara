@@ -21,9 +21,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from ara.utils.errors import OfflineError, WebBrowseError
 from ara.utils.logging import get_logger
@@ -53,6 +55,53 @@ _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 
 # Tags to remove from HTML before text extraction
 _REMOVE_TAGS = ["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]
+
+# Private/reserved IP ranges to block (SSRF prevention)
+_BLOCKED_IP_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _validate_url_safe(url: str) -> None:
+    """Validate that a URL does not target private/reserved IP ranges (SSRF protection).
+
+    Raises:
+        WebBrowseError: If the URL targets a private IP or uses a non-HTTP scheme.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise WebBrowseError(
+            url=url,
+            error=f"Blocked URL scheme '{parsed.scheme}'. Only http/https allowed.",
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise WebBrowseError(url=url, error="URL has no hostname.")
+
+    # Resolve hostname to IP and check against blocked ranges
+    import socket
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return  # DNS resolution failure is handled by the HTTP client
+
+    for addr_info in addr_infos:
+        ip = ipaddress.ip_address(addr_info[4][0])
+        for network in _BLOCKED_IP_NETWORKS:
+            if ip in network:
+                raise WebBrowseError(
+                    url=url,
+                    error=f"Blocked request to private/reserved IP {ip} (SSRF protection).",
+                )
 
 
 class PageContent:
@@ -220,6 +269,9 @@ class WebBrowser:
         """
         if not self._settings.internet_enabled:
             raise OfflineError("browse")
+
+        # SSRF protection: block private/reserved IPs
+        _validate_url_safe(url)
 
         start = time.perf_counter()
 

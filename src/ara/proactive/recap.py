@@ -304,14 +304,14 @@ class RecapGenerator:
             return ""
 
         valence_desc = "neutral"
-        if trend.avg_valence > 0.3:
-            valence_desc = "positive"
-        elif trend.avg_valence > 0.6:
+        if trend.avg_valence > 0.6:
             valence_desc = "very positive"
-        elif trend.avg_valence < -0.3:
-            valence_desc = "low"
+        elif trend.avg_valence > 0.3:
+            valence_desc = "positive"
         elif trend.avg_valence < -0.6:
             valence_desc = "very low"
+        elif trend.avg_valence < -0.3:
+            valence_desc = "low"
 
         dominant = trend.dominant_emotion
         if dominant:

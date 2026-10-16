@@ -19,10 +19,13 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -111,6 +114,11 @@ class AppState:
     # Connectivity
     connectivity_manager: ConnectivityManager | None = None
 
+    # Web services
+    web_search: object | None = None
+    web_browser: object | None = None
+    research_pipeline: object | None = None
+
     start_time: float = field(default_factory=time.monotonic)
 
     @property
@@ -134,13 +142,18 @@ def get_app_state(request: Request) -> AppState:
 
 
 async def _init_memory_subsystems(settings: AraSettings, app_state: AppState) -> None:
-    """Initialize memory subsystems: VectorStore, KnowledgeGraph, ConversationStore."""
+    """Initialize memory subsystems: VectorStore, KnowledgeGraph, ConversationStore.
+
+    All three components have synchronous ``connect()``/``load()`` methods
+    that perform file I/O (SQLite, LanceDB). We run them via
+    ``asyncio.to_thread()`` to avoid blocking the event loop during startup.
+    """
     # Vector store
     try:
         from ara.memory.vector_store import VectorStore
 
         vs = VectorStore(settings.memory)
-        vs.connect()
+        await asyncio.to_thread(vs.connect)
         app_state.vector_store = vs
         log.info("vector_store_connected", count=vs.count())
     except Exception as exc:
@@ -153,7 +166,7 @@ async def _init_memory_subsystems(settings: AraSettings, app_state: AppState) ->
         graph_dir = settings.data_dir / "graph_db"
         graph_dir.mkdir(parents=True, exist_ok=True)
         kg = KnowledgeGraph(graph_dir / "graph.sqlite")
-        kg.load()
+        await asyncio.to_thread(kg.load)
         app_state.knowledge_graph = kg
         log.info(
             "knowledge_graph_loaded",
@@ -168,7 +181,7 @@ async def _init_memory_subsystems(settings: AraSettings, app_state: AppState) ->
         from ara.memory.conversations import ConversationStore
 
         cs = ConversationStore(settings.conversation)
-        cs.connect()
+        await asyncio.to_thread(cs.connect)
         app_state.conversation_store = cs
         log.info("conversation_store_connected")
     except Exception as exc:
@@ -176,21 +189,28 @@ async def _init_memory_subsystems(settings: AraSettings, app_state: AppState) ->
 
 
 async def _init_retrieval(settings: AraSettings, app_state: AppState) -> None:
-    """Initialize embedding model, reranker, retrieval pipeline, and ingestion."""
+    """Initialize embedding model, reranker, retrieval pipeline, and ingestion.
+
+    Both RetrievalPipeline and IngestionPipeline share the same VectorStore
+    and EmbeddingModel so that data ingested at runtime is immediately
+    retrievable. Previous versions used ``IngestionPipeline.from_settings()``
+    which created separate instances — a critical wiring bug.
+    """
     if not app_state.vector_store:
         log.warning("retrieval_skipped", reason="vector_store not available")
         return
 
+    embedder = None
     try:
         from ara.memory.embeddings import EmbeddingModel
         from ara.memory.reranker import Reranker
         from ara.memory.retrieval import RetrievalPipeline
 
         embedder = EmbeddingModel(settings.memory)
-        embedder.load()
+        await asyncio.to_thread(embedder.load)
 
         reranker = Reranker(settings.memory)
-        reranker.load()
+        await asyncio.to_thread(reranker.load)
 
         rp = RetrievalPipeline(
             settings.memory,
@@ -204,14 +224,38 @@ async def _init_retrieval(settings: AraSettings, app_state: AppState) -> None:
     except Exception as exc:
         log.warning("retrieval_init_failed", error=str(exc))
 
-    # Ingestion pipeline
+    # Ingestion pipeline — shares the SAME vector store and embedder as retrieval
     try:
+        from pathlib import Path
+
+        from ara.memory.chunking import ChunkerConfig, TextChunker
         from ara.memory.ingestion import IngestionPipeline
 
-        ip = IngestionPipeline.from_settings(settings.memory)
-        ip.initialize()
+        chunker = TextChunker(
+            ChunkerConfig(
+                target_tokens=settings.memory.chunk_size,
+                overlap_tokens=settings.memory.chunk_overlap,
+            )
+        )
+        manifest_path = Path(settings.memory.vector_db_path) / "manifest.json"
+
+        # Use the same embedder and store that RetrievalPipeline uses.
+        # If embedder failed to load above we fall back to from_settings()
+        # (separate instances, better than no ingestion at all).
+        if embedder is not None and embedder.is_loaded:
+            ip = IngestionPipeline(
+                chunker=chunker,
+                embedder=embedder,
+                store=app_state.vector_store,
+                manifest_path=manifest_path,
+                graph=app_state.knowledge_graph,
+            )
+        else:
+            ip = IngestionPipeline.from_settings(settings.memory, graph=app_state.knowledge_graph)
+            ip.initialize()
+
         app_state.ingestion_pipeline = ip
-        log.info("ingestion_pipeline_ready")
+        log.info("ingestion_pipeline_ready", shared_store=embedder is not None)
     except Exception as exc:
         log.warning("ingestion_init_failed", error=str(exc))
 
@@ -441,6 +485,53 @@ async def _init_obsidian(settings: AraSettings, app_state: AppState) -> None:
         log.warning("obsidian_init_failed", error=str(exc))
 
 
+async def _wire_voice_to_orchestrator(app_state: AppState) -> None:
+    """Wire the voice pipeline's transcription callback to the orchestrator.
+
+    This must be called AFTER both voice and orchestrator are initialised.
+    It sets up the callback so that when the voice pipeline transcribes an
+    utterance, the text is sent through the orchestrator and the response
+    is streamed back via TTS sentence-by-sentence.
+
+    It also spawns ``voice.run()`` as a background task so the voice event
+    loop actually processes audio.
+    """
+    voice = app_state.voice_pipeline
+    orch = app_state.orchestrator
+    if voice is None or orch is None:
+        log.info("voice_wiring_skipped", voice=voice is not None, orchestrator=orch is not None)
+        return
+
+    async def _voice_transcription_handler(
+        text: str,
+        on_sentence: Callable[[str], Coroutine[Any, Any, None]],
+    ) -> str:
+        """Handle a transcribed utterance: route through orchestrator, stream TTS."""
+        try:
+            result = await orch.process(text)
+            response = result.response
+
+            # Stream full response as a single sentence for now.
+            # A proper sentence splitter can be added later for finer streaming.
+            if response:
+                await on_sentence(response)
+
+            return response
+        except Exception as exc:
+            log.error("voice_orchestrator_error", error=str(exc), text_preview=text[:50])
+            error_msg = "Sorry, I had trouble processing that. Could you say it again?"
+            await on_sentence(error_msg)
+            return error_msg
+
+    voice.set_transcription_callback(_voice_transcription_handler)
+
+    # Spawn the voice event loop as a background task
+    voice_task = asyncio.create_task(voice.run())
+    # Store reference so it doesn't get garbage collected
+    app_state._voice_task = voice_task  # type: ignore[attr-defined]
+    log.info("voice_pipeline_wired_and_running")
+
+
 async def _init_proactive(settings: AraSettings, app_state: AppState) -> None:
     """Initialize proactive scheduler and supporting subsystems."""
     if not settings.proactive.enabled:
@@ -562,6 +653,12 @@ async def _shutdown(app_state: AppState) -> None:
     # Voice
     if app_state.voice_pipeline:
         try:
+            # Cancel the background run() task if it exists
+            voice_task: asyncio.Task[None] | None = getattr(app_state, "_voice_task", None)
+            if voice_task is not None and not voice_task.done():
+                voice_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await voice_task
             await app_state.voice_pipeline.stop()
         except Exception as exc:
             log.warning("voice_shutdown_error", error=str(exc))
@@ -705,6 +802,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 5. Connectivity
         await _init_connectivity(settings, app_state)
 
+        # 5b. Web services (optional — research pipeline needs LLM)
+        try:
+            from ara.web.browser import WebBrowser
+            from ara.web.search import WebSearchService
+
+            search_service = WebSearchService(settings.internet)
+            web_browser = WebBrowser(settings.internet)
+            app_state.web_search = search_service
+            app_state.web_browser = web_browser
+
+            if app_state.llm_client is not None:
+                from ara.web.research import ResearchPipeline
+
+                research_pipeline = ResearchPipeline(
+                    settings.internet,
+                    app_state.llm_client,
+                    search_service,
+                    web_browser,
+                )
+                app_state.research_pipeline = research_pipeline
+
+            log.info(
+                "web_services_initialized",
+                research=app_state.research_pipeline is not None,
+            )
+        except Exception as exc:
+            log.warning("web_services_init_failed", error=str(exc))
+
         # 6. Vision
         await _init_vision(settings, app_state)
 
@@ -716,6 +841,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         # 9. Agents + orchestrator
         await _init_agents(settings, app_state)
+
+        # 9b. Wire voice → orchestrator (needs both to be ready)
+        await _wire_voice_to_orchestrator(app_state)
 
         # 10. Proactive
         await _init_proactive(settings, app_state)

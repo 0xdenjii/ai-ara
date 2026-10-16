@@ -1,7 +1,7 @@
 """Wake Word Detection — openWakeWord wrapper.
 
-Detects the wake phrase (currently "hey jarvis" as placeholder for
-custom "hey ara") in continuous audio. Runs on CPU with ONNX backend.
+Uses 'hey jarvis' as the trigger phrase. Custom 'hey ara' model requires
+training a custom openWakeWord model. Runs on CPU with ONNX backend.
 All configuration comes from AraSettings.
 """
 

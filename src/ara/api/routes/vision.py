@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from ara.api.app import AppState, get_app_state
 from ara.utils.logging import get_logger
+from ara.vision.pipeline import VisionTaskType
 
 log = get_logger("api.vision")
 
@@ -114,18 +116,25 @@ async def vision_analyze(
             task=task,
         )
 
-    # Read file content
+    # Read file content with chunked size check to prevent memory exhaustion
     try:
-        content = await file.read()
+        chunks: list[bytes] = []
+        total_read = 0
+        while True:
+            chunk = await file.read(65536)  # 64KB chunks
+            if not chunk:
+                break
+            total_read += len(chunk)
+            if total_read > _MAX_FILE_SIZE_BYTES:
+                return VisionAnalyzeResponse(
+                    error=f"File too large (>{_MAX_FILE_SIZE_BYTES} bytes). Maximum: {_MAX_FILE_SIZE_BYTES} bytes",
+                    task=task,
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
     except Exception as exc:
         return VisionAnalyzeResponse(
             error=f"Failed to read uploaded file: {exc}",
-            task=task,
-        )
-
-    if len(content) > _MAX_FILE_SIZE_BYTES:
-        return VisionAnalyzeResponse(
-            error=f"File too large ({len(content)} bytes). Maximum: {_MAX_FILE_SIZE_BYTES} bytes",
             task=task,
         )
 
@@ -147,7 +156,26 @@ async def vision_analyze(
 
         import time
 
+        # Open image as PIL Image for the pipeline
+        pil_image = Image.open(tmp_path)
+        pil_image.load()  # Force load so file handle can be released
+
         start = time.monotonic()
+
+        # Map task string to VisionTaskType enum
+        task_type_map: dict[str, VisionTaskType] = {
+            "caption": VisionTaskType.CAPTION,
+            "vqa": VisionTaskType.VQA,
+            "ocr": VisionTaskType.OCR,
+            "document": VisionTaskType.DOCUMENT,
+            "detect": VisionTaskType.DETECT,
+        }
+        vision_task = task_type_map.get(task)
+        if vision_task is None:
+            return VisionAnalyzeResponse(
+                error=f"Unknown task: {task}. Supported: caption, vqa, ocr, document, detect",
+                task=task,
+            )
 
         # Route to appropriate pipeline method based on task
         result: Any = None
@@ -155,52 +183,40 @@ async def vision_analyze(
 
         if task == "caption":
             result = await state.vision_pipeline.analyze(
-                str(tmp_path), question="Describe this image."
+                pil_image, vision_task, question="Describe this image."
             )
         elif task == "vqa":
-            result = await state.vision_pipeline.analyze(str(tmp_path), question=question)
+            result = await state.vision_pipeline.analyze(pil_image, vision_task, question=question)
         elif task == "ocr":
             result = await state.vision_pipeline.analyze(
-                str(tmp_path), question="Extract all text from this image."
+                pil_image, vision_task, question="Extract all text from this image."
             )
         elif task == "document":
             result = await state.vision_pipeline.analyze(
-                str(tmp_path),
+                pil_image,
+                vision_task,
                 question="Analyze this document. Describe its contents, structure, and key information.",
             )
         elif task == "detect":
             result = await state.vision_pipeline.analyze(
-                str(tmp_path),
+                pil_image,
+                vision_task,
                 question="Identify and list all objects in this image with their locations.",
-            )
-        else:
-            return VisionAnalyzeResponse(
-                error=f"Unknown task: {task}. Supported: caption, vqa, ocr, document, detect",
-                task=task,
             )
 
         elapsed = (time.monotonic() - start) * 1000
 
-        # Extract response text from result
+        # Extract response text from result (PipelineResult has .text, .model_used, .total_time_ms)
         description = ""
         if result:
-            if hasattr(result, "description"):
-                description = result.description
-            elif hasattr(result, "text"):
-                description = result.text
-            elif isinstance(result, str):
-                description = result
-            else:
-                description = str(result)
-
-            if hasattr(result, "model"):
-                model_used = result.model
+            description = result.text
+            model_used = result.model_used
 
         return VisionAnalyzeResponse(
             description=description,
             task=task,
             model_used=model_used,
-            elapsed_ms=round(elapsed, 1),
+            elapsed_ms=round(result.total_time_ms if result else elapsed, 1),
             success=True,
         )
 

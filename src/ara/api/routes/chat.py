@@ -7,9 +7,11 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ara.api.app import AppState, get_app_state
@@ -51,12 +53,10 @@ async def chat(
     Otherwise falls back to direct LLM generation.
     """
     if not state.llm_client or not state.llm_client.is_connected:
-        return ChatResponse(
-            response="",
-            error="LLM is not connected. Check Ollama status.",
-        )
+        raise HTTPException(status_code=503, detail="LLM is not connected. Check Ollama status.")
 
     messages = _build_messages(request)
+    chat_response: ChatResponse | None = None
 
     # Try orchestrator first
     if state.orchestrator:
@@ -64,13 +64,41 @@ async def chat(
             history = [
                 ChatMessage(role=MessageRole(m.role), content=m.content) for m in request.history
             ]
+            # If frontend sent no history but we have a conversation_id, load from store
+            if (
+                not history
+                and request.conversation_id
+                and state.conversation_store
+                and state.conversation_store.is_connected
+            ):
+                try:
+                    loop = asyncio.get_running_loop()
+                    conv = await loop.run_in_executor(
+                        None,
+                        state.conversation_store.get_conversation,
+                        request.conversation_id,
+                    )
+                    if conv and conv.turns:
+                        for turn in conv.turns[-10:]:
+                            if turn.user_message:
+                                history.append(
+                                    ChatMessage(role=MessageRole.USER, content=turn.user_message)
+                                )
+                            if turn.assistant_message:
+                                history.append(
+                                    ChatMessage(
+                                        role=MessageRole.ASSISTANT, content=turn.assistant_message
+                                    )
+                                )
+                except Exception as exc:
+                    log.warning("history_load_from_store_failed", error=str(exc))
             result = await state.orchestrator.process(
                 request.message,
                 conversation_id=request.conversation_id,
                 conversation_history=history,
                 max_steps=request.max_steps,
             )
-            return ChatResponse(
+            chat_response = ChatResponse(
                 response=result.response,
                 conversation_id=request.conversation_id,
                 intent=result.intent,
@@ -85,26 +113,74 @@ async def chat(
             log.warning("orchestrator_failed_fallback_to_llm", error=str(exc))
 
     # Direct LLM fallback
-    try:
-        from ara.core.prompts import build_system_message
+    if chat_response is None:
+        try:
+            from ara.core.prompts import build_system_message
 
-        system_msg = build_system_message(state.settings.personality)
-        all_messages = [system_msg, *messages]
-        response_text = await state.llm_client.generate(all_messages)
+            system_msg = build_system_message(state.settings.personality)
+            all_messages = [system_msg, *messages]
+            response_text = await state.llm_client.generate(all_messages)
 
-        # Filter think blocks
-        from ara.core.streaming import filter_think_blocks
+            # Filter think blocks
+            from ara.core.streaming import filter_think_blocks
 
-        response_text = filter_think_blocks(response_text)
+            response_text = filter_think_blocks(response_text)
 
-        return ChatResponse(
-            response=response_text,
-            conversation_id=request.conversation_id,
-            intent="general",
-            agent="direct_llm",
-        )
-    except LLMError as exc:
-        return ChatResponse(response="", error=str(exc))
+            chat_response = ChatResponse(
+                response=response_text,
+                conversation_id=request.conversation_id,
+                intent="general",
+                agent="direct_llm",
+            )
+        except LLMError as exc:
+            return ChatResponse(response="", error=str(exc))
+
+    # ── Filter think blocks from any response path ────────────────────────
+    from ara.core.streaming import filter_think_blocks
+
+    chat_response.response = filter_think_blocks(chat_response.response)
+
+    # ── Conversation persistence & activity signals ──────────────────────
+    response_text = chat_response.response
+    conv_id = request.conversation_id
+
+    if state.conversation_store and state.conversation_store.is_connected:
+        try:
+            loop = asyncio.get_running_loop()
+            if not conv_id:
+                conv_id = await loop.run_in_executor(
+                    None,
+                    state.conversation_store.start_conversation,
+                )
+                chat_response.conversation_id = conv_id
+            await loop.run_in_executor(
+                None,
+                lambda: state.conversation_store.add_turn(
+                    conv_id,
+                    user_message=request.message,
+                    assistant_message=response_text,
+                ),
+            )
+        except Exception as exc:
+            log.warning("conversation_tracking_failed", error=str(exc))
+
+    # Record user activity for proactive scheduler
+    if state.proactive_scheduler:
+        with contextlib.suppress(Exception):
+            state.proactive_scheduler.record_user_activity()
+
+    # Record mood (background, non-blocking)
+    if state.mood_tracker and state.mood_tracker.is_connected:
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: state.mood_tracker.record_from_text(
+                    request.message,
+                    conversation_id=conv_id,
+                ),
+            )
+
+    return chat_response
 
 
 async def _stream_tokens(
@@ -112,6 +188,9 @@ async def _stream_tokens(
     request: ChatRequest,
 ) -> AsyncIterator[str]:
     """Generate SSE events for streaming chat.
+
+    Routes through the orchestrator if available (non-streaming, sends
+    result as a final chunk), otherwise falls back to direct LLM streaming.
 
     Yields Server-Sent Events in the format:
         data: {"type": "token", "content": "..."}
@@ -123,6 +202,35 @@ async def _stream_tokens(
         yield f"data: {chunk.model_dump_json()}\n\n"
         return
 
+    # Try orchestrator first (non-streaming, send result as final SSE chunk)
+    if state.orchestrator:
+        try:
+            history = [
+                ChatMessage(role=MessageRole(m.role), content=m.content) for m in request.history
+            ]
+            result = await state.orchestrator.process(
+                request.message,
+                conversation_id=request.conversation_id,
+                conversation_history=history,
+                max_steps=request.max_steps,
+            )
+            if result.response:
+                chunk = StreamChunk(type="token", content=result.response)
+                yield f"data: {chunk.model_dump_json()}\n\n"
+            done_chunk = StreamChunk(
+                type="done",
+                metadata={
+                    "intent": result.intent,
+                    "agent": result.agent,
+                    "elapsed_ms": result.elapsed_ms,
+                },
+            )
+            yield f"data: {done_chunk.model_dump_json()}\n\n"
+            return
+        except Exception as exc:
+            log.warning("stream_orchestrator_failed_fallback_to_llm", error=str(exc))
+
+    # Fallback: direct LLM streaming
     messages = _build_messages(request)
 
     try:

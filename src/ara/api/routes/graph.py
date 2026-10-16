@@ -160,9 +160,9 @@ async def graph_stats(
     try:
         stats = state.knowledge_graph.get_stats()
         return GraphStatsResponse(
-            entity_count=int(stats.get("entity_count", 0)),  # type: ignore[arg-type]
-            relation_count=int(stats.get("relation_count", 0)),  # type: ignore[arg-type]
-            type_distribution=stats.get("type_distribution", {}),  # type: ignore[arg-type]
+            entity_count=int(stats.get("total_entities", 0)),  # type: ignore[arg-type]
+            relation_count=int(stats.get("total_relations", 0)),  # type: ignore[arg-type]
+            type_distribution=stats.get("entity_types", {}),  # type: ignore[arg-type]
             top_entities=stats.get("top_entities", []),  # type: ignore[arg-type]
             connected_components=int(stats.get("connected_components", 0)),  # type: ignore[arg-type]
         )
@@ -173,7 +173,7 @@ async def graph_stats(
 
 @router.get("/search", response_model=GraphSearchResponse)
 async def graph_search(
-    query: str = Query(..., min_length=1, max_length=200),
+    query: str = Query(default="", max_length=200),
     entity_type: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     state: AppState = Depends(get_app_state),

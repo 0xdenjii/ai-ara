@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
@@ -76,13 +77,21 @@ class VoicePipeline:
         # State
         self._state = VoicePipelineState.IDLE
         self._running = False
-        self._stop_event = asyncio.Event()
         self._activated = asyncio.Event()
+
+        # Runtime toggles (override settings without persisting)
+        self._wake_word_enabled = settings.wake_word.enabled
+        self._hotkey_enabled = True
 
         # Callbacks
         self._on_transcription: TranscriptionCallback | None = None
         self._on_state_change: Callable[[VoicePipelineState], Any] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+
+        # Pre-speech audio buffer: holds chunks during VAD onset detection
+        # so they can be retroactively fed to STT when speech is confirmed.
+        # ~20 chunks at 30ms each = ~600ms lookback (covers typical min_speech_ms)
+        self._pre_speech_buffer: deque[Any] = deque(maxlen=20)
 
         # Metrics
         self._utterance_start_time: float = 0.0
@@ -104,6 +113,26 @@ class VoicePipeline:
     def total_utterances(self) -> int:
         """Number of utterances processed since start."""
         return self._total_utterances
+
+    @property
+    def wake_word_enabled(self) -> bool:
+        """Whether wake word detection is enabled at runtime."""
+        return self._wake_word_enabled
+
+    @wake_word_enabled.setter
+    def wake_word_enabled(self, value: bool) -> None:
+        self._wake_word_enabled = value
+        log.info("wake_word_toggled", enabled=value)
+
+    @property
+    def hotkey_enabled(self) -> bool:
+        """Whether hotkey activation is enabled at runtime."""
+        return self._hotkey_enabled
+
+    @hotkey_enabled.setter
+    def hotkey_enabled(self, value: bool) -> None:
+        self._hotkey_enabled = value
+        log.info("hotkey_toggled", enabled=value)
 
     # ── Configuration ────────────────────────────────────────────────────
 
@@ -156,7 +185,6 @@ class VoicePipeline:
         log.info("pipeline_started", load_time_ms=round(load_ms, 1))
 
         self._running = True
-        self._stop_event.clear()
         self._set_state(VoicePipelineState.IDLE)
 
     async def stop(self) -> None:
@@ -166,7 +194,6 @@ class VoicePipeline:
 
         log.info("pipeline_stopping")
         self._running = False
-        self._stop_event.set()
         self._activated.set()  # unblock any pending wait
 
         # Stop mic
@@ -261,9 +288,9 @@ class VoicePipeline:
         if chunk is None:
             return
 
-        if not self._wake_word.is_enabled:
-            # Wake word disabled — stay idle until manual activation
-            # Drain buffer to prevent buildup
+        if not self._wake_word_enabled or not self._wake_word.is_enabled:
+            # Wake word disabled (runtime toggle or settings) — stay idle
+            # until manual activation. Drain buffer to prevent buildup
             self._ring_buffer.clear()
             await asyncio.sleep(0.05)
             return
@@ -302,11 +329,24 @@ class VoicePipeline:
         )
 
         if self._segment_tracker.is_speaking:
-            # Feed audio to STT as float list (moonshine-voice native format)
+            # On speech onset, flush pre-speech buffer to STT first
+            if state_changed:
+                for buffered_chunk in self._pre_speech_buffer:
+                    self._stt.feed_audio(
+                        buffered_chunk.tolist(), sample_rate=self._settings.audio.sample_rate
+                    )
+                self._pre_speech_buffer.clear()
+
+            # Feed current audio to STT as float list (moonshine-voice native format)
             self._stt.feed_audio(chunk.tolist(), sample_rate=self._settings.audio.sample_rate)
 
-        elif state_changed and not self._segment_tracker.is_speaking:
+        else:
+            # Not yet confirmed as speech — buffer for retroactive STT feed
+            self._pre_speech_buffer.append(chunk)
+
+        if state_changed and not self._segment_tracker.is_speaking:
             # Speech just ended — get final transcription
+            self._pre_speech_buffer.clear()
             event = self._stt.end_utterance()
             if event is not None and event.text.strip():
                 elapsed_ms = (time.monotonic() - self._utterance_start_time) * 1000
@@ -387,14 +427,14 @@ class VoicePipeline:
 
         try:
             # Set up sentence-streaming TTS
-            tts_tasks: list[asyncio.Task[None]] = []
 
             async def on_sentence(sentence: str) -> None:
                 """Synthesize and play each sentence as it arrives."""
                 if not self._running:
                     return
                 try:
-                    tts_result = self._tts.synthesize(sentence)
+                    loop = asyncio.get_running_loop()
+                    tts_result = await loop.run_in_executor(None, self._tts.synthesize, sentence)
                     if len(tts_result.samples) > 0:
                         self._set_state(VoicePipelineState.SPEAKING)
                         await self._speaker.play(
@@ -406,11 +446,6 @@ class VoicePipeline:
 
             # Call the LLM handler with the sentence callback
             response = await self._on_transcription(text, on_sentence)
-
-            # Wait for any remaining TTS playback
-            for task in tts_tasks:
-                if not task.done():
-                    await task
 
             process_ms = (time.monotonic() - process_start) * 1000
             log.info(

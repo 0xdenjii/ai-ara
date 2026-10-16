@@ -33,11 +33,12 @@ async def voice_status(
         return VoiceStatusResponse(
             state=str(state.voice_pipeline.state),
             wake_word_enabled=state.voice_pipeline.wake_word_enabled,
+            hotkey_enabled=state.voice_pipeline.hotkey_enabled,
             stt_model=state.settings.stt.model_arch_name
             if hasattr(state.settings.stt, "model_arch_name")
             else "moonshine-v2",
             tts_model="kokoro-82m",
-            tts_voice=state.settings.tts.default_voice,
+            tts_voice=state.settings.tts.voice,
         )
     except Exception as exc:
         log.warning("voice_status_error", error=str(exc))
@@ -94,11 +95,13 @@ async def voice_control(
             )
 
         if request.action == "toggle_hotkey":
+            current = state.voice_pipeline.hotkey_enabled
+            state.voice_pipeline.hotkey_enabled = not current
             return VoiceControlResponse(
                 action="toggle_hotkey",
                 success=True,
                 state=str(state.voice_pipeline.state),
-                message="Hotkey toggled",
+                message=f"Hotkey {'enabled' if not current else 'disabled'}",
             )
 
         return VoiceControlResponse(

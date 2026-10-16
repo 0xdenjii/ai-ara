@@ -279,7 +279,7 @@ class ConnectivityManager:
                 log.debug("custom_check_fn_failed", error=str(exc))
                 return False
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for host, port in _CHECK_HOSTS:
             try:

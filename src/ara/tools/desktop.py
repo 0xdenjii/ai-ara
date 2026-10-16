@@ -107,9 +107,23 @@ class OpenApplicationTool(BaseTool):
                     description="Application name (e.g. 'chrome', 'notepad', 'vscode').",
                 ),
             ),
-            risk_level=ToolRiskLevel.SAFE,
+            risk_level=ToolRiskLevel.MODERATE,
             category="desktop",
         )
+
+    # Extensions that are blocked from os.startfile fallback
+    _BLOCKED_EXTENSIONS: frozenset[str] = frozenset(
+        {
+            ".exe",
+            ".bat",
+            ".ps1",
+            ".vbs",
+            ".cmd",
+            ".msi",
+            ".com",
+            ".scr",
+        }
+    )
 
     async def execute(self, parameters: dict[str, Any]) -> str:
         name = parameters["name"].strip().lower()
@@ -149,6 +163,15 @@ class OpenApplicationTool(BaseTool):
                     ) from exc
 
         # Try os.startfile as fallback (uses Windows file associations)
+        # Block dangerous file extensions to prevent arbitrary executable launches
+        name_ext = Path(name).suffix.lower()
+        if name_ext in self._BLOCKED_EXTENSIONS:
+            raise DesktopError(
+                f"Blocked: cannot open '{name}' — extension '{name_ext}' is not allowed for safety.",
+                operation="open_application",
+                details={"app": name, "extension": name_ext},
+            )
+
         try:
             os.startfile(name)
             return f"Opened '{name}' via Windows file association."
@@ -452,7 +475,7 @@ class OpenURLTool(BaseTool):
         import webbrowser
 
         url = parameters["url"].strip()
-        if not url.startswith(("http://", "https://", "file://")):
+        if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
         webbrowser.open(url)

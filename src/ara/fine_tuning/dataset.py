@@ -68,22 +68,89 @@ class HumorLevel(StrEnum):
     UNFILTERED = "unfiltered"  # Dial 10
 
 
+class SegmentCategory(StrEnum):
+    """Content category for weighted sampling.
+
+    User preference: 5x personal/emotional, 3x knowledge/info, 1x other.
+    """
+
+    PERSONAL = "personal"  # Diary, feelings, emotions, life story (5x weight)
+    KNOWLEDGE = "knowledge"  # Study notes, technical content, startup docs (3x weight)
+    OTHER = "other"  # Misc, school projects, link dumps (1x weight)
+
+
+# Weights for sampling: how many training samples to generate per segment
+CATEGORY_WEIGHTS: dict[SegmentCategory, int] = {
+    SegmentCategory.PERSONAL: 5,
+    SegmentCategory.KNOWLEDGE: 3,
+    SegmentCategory.OTHER: 1,
+}
+
+
 @dataclass(frozen=True)
 class DiarySegment:
     """A parsed segment from a diary file."""
 
     text: str
     source_file: str
+    source_path: str  # Full relative path from diary root (for classification)
     date: str  # YYYY-MM-DD or empty
     section_title: str
     token_count: int
     segment_id: str  # Deterministic hash
+    category: SegmentCategory  # Content category for weighted sampling
 
     @staticmethod
     def compute_id(text: str, source_file: str) -> str:
         """Generate deterministic ID from content + source."""
         content = f"{source_file}:{text[:200]}"
         return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+# Notion export block IDs for diary folder classification
+_JOURNAL_ID = "aaaa0001"  # Personal diary (ai-ara)
+_LIFE_NOTES_ID = "aaaa0004"  # Study notes, todos (Life Notes)
+_MISC_ID = "aaaa0005"  # Misc (Misc)
+_ACME_ID = "aaaa0002"  # Acme competitor docs
+_ARCHIVE_ID = "aaaa0003"  # Mixed (Archive)
+
+
+def classify_segment_path(relative_path: str) -> SegmentCategory:
+    """Classify a diary file path into a content category for weighted sampling.
+
+    Classification rules (based on Notion export directory structure):
+    - ai-ara export (aaaa0001) → PERSONAL (personal diary entries)
+    - "story of our life" → PERSONAL (early personal diary)
+    - 2020-2021 raw files (except 12.docx) → PERSONAL (early diary)
+    - NIKHIL'S VENGENCE → PERSONAL (personal story)
+    - Life Notes export (aaaa0004) → KNOWLEDGE (study notes, technical)
+    - Everything else → OTHER (misc, school projects)
+
+    Args:
+        relative_path: File path relative to the diary root directory.
+
+    Returns:
+        SegmentCategory for weighted sampling.
+    """
+    path_lower = relative_path.lower()
+
+    # Personal diary entries (5x weight)
+    if _JOURNAL_ID in path_lower:
+        return SegmentCategory.PERSONAL
+    if "story of our life" in path_lower:
+        return SegmentCategory.PERSONAL
+    if "nikhil" in path_lower and "vengence" in path_lower:
+        return SegmentCategory.PERSONAL
+    # 2020-2021 raw diary files (except 12.docx which is a school project)
+    if "2020-2021" in path_lower and "12.docx" not in path_lower:
+        return SegmentCategory.PERSONAL
+
+    # Knowledge/study content (3x weight)
+    if _LIFE_NOTES_ID in path_lower:
+        return SegmentCategory.KNOWLEDGE
+
+    # Everything else: 1x weight
+    return SegmentCategory.OTHER
 
 
 @dataclass
@@ -163,7 +230,10 @@ _DATE_PATTERNS = [
 _SECTION_PATTERN = re.compile(r"^(#{2,4})\s+(.+)$", re.MULTILINE)
 
 
-def parse_diary_file(file_path: Path) -> list[DiarySegment]:
+def parse_diary_file(
+    file_path: Path,
+    diary_root: Path | None = None,
+) -> list[DiarySegment]:
     """Parse a diary markdown file into dated segments.
 
     Splits on date headers, then on section headers within date blocks.
@@ -171,12 +241,24 @@ def parse_diary_file(file_path: Path) -> list[DiarySegment]:
 
     Args:
         file_path: Path to the markdown diary file.
+        diary_root: Root diary directory (for relative path computation and
+            category classification). If None, category defaults to OTHER.
 
     Returns:
         List of DiarySegment objects.
     """
     text = file_path.read_text(encoding="utf-8", errors="replace")
     source = file_path.name
+
+    # Compute relative path and category
+    if diary_root is not None:
+        try:
+            rel_path = str(file_path.relative_to(diary_root))
+        except ValueError:
+            rel_path = source
+    else:
+        rel_path = source
+    category = classify_segment_path(rel_path)
 
     # Find all date boundaries
     date_positions: list[tuple[int, str, str]] = []  # (position, date, title)
@@ -190,21 +272,21 @@ def parse_diary_file(file_path: Path) -> list[DiarySegment]:
     date_positions.sort(key=lambda x: x[0])
 
     if not date_positions:
-        # No date headers — treat entire file as one segment
+        # No date headers — split at paragraph boundaries if file is large
         tokens = count_tokens(text)
-        if tokens >= MIN_SEGMENT_TOKENS:
-            seg_id = DiarySegment.compute_id(text, source)
-            return [
-                DiarySegment(
-                    text=text.strip(),
-                    source_file=source,
-                    date="",
-                    section_title=file_path.stem,
-                    token_count=tokens,
-                    segment_id=seg_id,
-                )
-            ]
-        return []
+        if tokens < MIN_SEGMENT_TOKENS:
+            return []
+        segments = _split_block_into_segments(
+            text.strip(),
+            source,
+            rel_path,
+            category,
+            "",
+            file_path.stem,
+        )
+        segments = [s for s in segments if s.token_count >= MIN_SEGMENT_TOKENS]
+        log.info("parsed_diary_file", file=source, segments=len(segments))
+        return segments
 
     segments: list[DiarySegment] = []
 
@@ -217,7 +299,9 @@ def parse_diary_file(file_path: Path) -> list[DiarySegment]:
             continue
 
         # Split block into sub-sections if it's large
-        sub_segments = _split_block_into_segments(block, source, date_str, title)
+        sub_segments = _split_block_into_segments(
+            block, source, rel_path, category, date_str, title
+        )
         segments.extend(sub_segments)
 
     # Filter out tiny segments
@@ -230,13 +314,17 @@ def parse_diary_file(file_path: Path) -> list[DiarySegment]:
 def _split_block_into_segments(
     block: str,
     source: str,
+    source_path: str,
+    category: SegmentCategory,
     date_str: str,
     title: str,
 ) -> list[DiarySegment]:
     """Split a date-bounded block into segments respecting token limits.
 
     If the block is small enough, returns it as a single segment.
-    Otherwise, splits at paragraph boundaries.
+    Otherwise, splits at paragraph boundaries (double newlines). If individual
+    paragraphs still exceed MAX_TURN_TOKENS, splits further at single newline
+    boundaries, then at sentence boundaries as a last resort.
     """
     tokens = count_tokens(block)
 
@@ -246,23 +334,34 @@ def _split_block_into_segments(
             DiarySegment(
                 text=block,
                 source_file=source,
+                source_path=source_path,
                 date=date_str,
                 section_title=title,
                 token_count=tokens,
                 segment_id=seg_id,
+                category=category,
             )
         ]
 
     # Split at double newlines (paragraph boundaries)
     paragraphs = re.split(r"\n\n+", block)
+
+    # Expand oversized paragraphs: split at single newlines, then sentences
+    expanded: list[str] = []
+    for para in paragraphs:
+        if count_tokens(para) <= MAX_TURN_TOKENS:
+            expanded.append(para)
+        else:
+            expanded.extend(_split_oversized_paragraph(para))
+
     segments: list[DiarySegment] = []
     current_parts: list[str] = []
     current_tokens = 0
 
-    for para in paragraphs:
-        para_tokens = count_tokens(para)
+    for part in expanded:
+        part_tokens = count_tokens(part)
 
-        if current_tokens + para_tokens > MAX_TURN_TOKENS and current_parts:
+        if current_tokens + part_tokens > MAX_TURN_TOKENS and current_parts:
             # Flush accumulated parts
             combined = "\n\n".join(current_parts)
             seg_id = DiarySegment.compute_id(combined, source)
@@ -270,17 +369,19 @@ def _split_block_into_segments(
                 DiarySegment(
                     text=combined,
                     source_file=source,
+                    source_path=source_path,
                     date=date_str,
                     section_title=title,
                     token_count=count_tokens(combined),
                     segment_id=seg_id,
+                    category=category,
                 )
             )
             current_parts = []
             current_tokens = 0
 
-        current_parts.append(para)
-        current_tokens += para_tokens
+        current_parts.append(part)
+        current_tokens += part_tokens
 
     # Flush remaining
     if current_parts:
@@ -290,14 +391,64 @@ def _split_block_into_segments(
             DiarySegment(
                 text=combined,
                 source_file=source,
+                source_path=source_path,
                 date=date_str,
                 section_title=title,
                 token_count=count_tokens(combined),
                 segment_id=seg_id,
+                category=category,
             )
         )
 
     return segments
+
+
+# Sentence boundary pattern: split after .!? followed by whitespace or end-of-string
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_oversized_paragraph(paragraph: str) -> list[str]:
+    """Split a single oversized paragraph into chunks under MAX_TURN_TOKENS.
+
+    Strategy:
+    1. Split at single newline boundaries first.
+    2. If any resulting chunk is still too large, split at sentence boundaries.
+    3. If a single sentence exceeds the limit, hard-split at token boundaries.
+    """
+    # Stage 1: split at single newlines
+    lines = paragraph.split("\n")
+    chunks: list[str] = []
+
+    for line in lines:
+        line_tokens = count_tokens(line)
+        if line_tokens <= MAX_TURN_TOKENS:
+            chunks.append(line)
+        else:
+            # Stage 2: split at sentence boundaries
+            sentences = _SENTENCE_BOUNDARY.split(line)
+            for sentence in sentences:
+                sent_tokens = count_tokens(sentence)
+                if sent_tokens <= MAX_TURN_TOKENS:
+                    chunks.append(sentence)
+                else:
+                    # Stage 3: hard split by encoding tokens
+                    chunks.extend(_hard_split_by_tokens(sentence))
+
+    return chunks
+
+
+def _hard_split_by_tokens(text: str, chunk_size: int = MAX_TURN_TOKENS) -> list[str]:
+    """Hard-split text into chunks of at most chunk_size tokens.
+
+    Uses the tiktoken encoding to split precisely at token boundaries
+    so no content is lost.
+    """
+    encoded = _ENCODING.encode(text)
+    parts: list[str] = []
+    for i in range(0, len(encoded), chunk_size):
+        part_tokens = encoded[i : i + chunk_size]
+        parts.append(_ENCODING.decode(part_tokens))
+    return parts
 
 
 def scan_diary_directory(diary_dir: Path) -> list[DiarySegment]:
@@ -321,7 +472,7 @@ def scan_diary_directory(diary_dir: Path) -> list[DiarySegment]:
         if "work" in str(md_file).lower():
             continue
 
-        segments = parse_diary_file(md_file)
+        segments = parse_diary_file(md_file, diary_root=diary_dir)
         all_segments.extend(segments)
 
     # Sort: segments with dates first (chronological), dateless last
@@ -329,6 +480,71 @@ def scan_diary_directory(diary_dir: Path) -> list[DiarySegment]:
 
     log.info("scanned_diary_directory", dir=str(diary_dir), total_segments=len(all_segments))
     return all_segments
+
+
+def build_weighted_segment_pool(
+    segments: list[DiarySegment],
+    target_samples: int,
+) -> list[DiarySegment]:
+    """Build a weighted pool of segments for training data generation.
+
+    Expands segments according to their category weight so higher-value
+    content gets proportionally more training samples generated from it.
+
+    Weights (from user preferences):
+    - PERSONAL (diary, emotions): 5x — appears 5 times in pool
+    - KNOWLEDGE (study notes, technical): 3x — appears 3 times in pool
+    - OTHER (misc, school projects): 1x — appears 1 time in pool
+
+    The pool is then shuffled deterministically and truncated to
+    match the target sample count. This means PERSONAL segments
+    are ~5x more likely to be selected as source material.
+
+    Args:
+        segments: All diary segments with category classification.
+        target_samples: Target number of samples to generate.
+
+    Returns:
+        Weighted list of segments (may contain duplicates), shuffled and
+        truncated to target_samples length.
+    """
+    import random
+
+    weighted: list[DiarySegment] = []
+    for seg in segments:
+        weight = CATEGORY_WEIGHTS.get(seg.category, 1)
+        weighted.extend([seg] * weight)
+
+    if not weighted:
+        return []
+
+    # Deterministic shuffle
+    rng = random.Random(42)
+    rng.shuffle(weighted)
+
+    # Truncate or cycle to target
+    if len(weighted) >= target_samples:
+        return weighted[:target_samples]
+
+    # If pool is smaller than target, cycle through it
+    return [weighted[i % len(weighted)] for i in range(target_samples)]
+
+
+def get_segment_category_stats(
+    segments: list[DiarySegment],
+) -> dict[str, int]:
+    """Get counts of segments by category.
+
+    Args:
+        segments: List of classified diary segments.
+
+    Returns:
+        Dict mapping category name to count.
+    """
+    from collections import Counter
+
+    counts = Counter(s.category.value for s in segments)
+    return dict(counts)
 
 
 # ── Prompt Templates for Synthetic Data Generation ────────────────────────────
@@ -589,23 +805,26 @@ def parse_llm_json_response(response: str) -> Any:
 
 
 def validate_conversation_messages(
-    raw_messages: list[dict[str, str]],
+    raw_messages: Any,
 ) -> list[ChatMLMessage] | None:
     """Validate and convert raw message dicts from LLM output.
 
     Args:
         raw_messages: List of {"role": "...", "content": "..."} dicts.
+            Handles malformed inputs gracefully (non-list, non-dict items).
 
     Returns:
         List of ChatMLMessage objects if valid, None if invalid.
     """
-    if not raw_messages or len(raw_messages) < 2:
+    if not isinstance(raw_messages, list) or len(raw_messages) < 2:
         return None
 
     valid_roles = {"user", "assistant"}
     messages: list[ChatMLMessage] = []
 
     for msg in raw_messages:
+        if not isinstance(msg, dict):
+            return None
         role = msg.get("role", "")
         content = msg.get("content", "")
 

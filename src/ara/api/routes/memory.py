@@ -10,6 +10,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import contextlib
 import tempfile
 from pathlib import Path
 
@@ -75,24 +76,71 @@ async def memory_search(
 
     Returns matching memory chunks ranked by relevance.
     """
+    # Prefer the shared retrieval pipeline (avoids loading embedder per request)
+    if state.retrieval_pipeline:
+        try:
+            from ara.utils.types import MemorySource
+
+            source_filter_enum: MemorySource | None = None
+            if request.source_filter:
+                with contextlib.suppress(ValueError):
+                    source_filter_enum = MemorySource(request.source_filter)
+
+            ctx = state.retrieval_pipeline.retrieve(
+                request.query,
+                top_k=request.top_k,
+                source_filter=source_filter_enum,
+            )
+
+            items: list[MemoryChunkItem] = [
+                MemoryChunkItem(
+                    chunk_id=r.chunk.chunk_id,
+                    text=r.chunk.text,
+                    source=r.chunk.source.value
+                    if hasattr(r.chunk.source, "value")
+                    else str(r.chunk.source),
+                    source_file=r.chunk.source_file,
+                    score=r.score,
+                    retrieval_method=r.retrieval_method,
+                )
+                for r in ctx.results
+            ]
+
+            return MemorySearchResponse(
+                results=items,
+                query=request.query,
+                total_candidates=ctx.total_candidates or len(items),
+            )
+
+        except Exception as exc:
+            log.error("memory_search_pipeline_failed", error=str(exc))
+            return MemorySearchResponse(query=request.query)
+
+    # Fallback: per-request embedding model (expensive, avoid in production)
     if not state.vector_store:
         return MemorySearchResponse(query=request.query)
 
     try:
         from ara.memory.embeddings import EmbeddingModel
+        from ara.utils.types import MemorySource as _MemorySource
 
         embedder = EmbeddingModel(state.settings.memory)
         embedder.load()
 
         query_embedding = embedder.embed_query(request.query)
 
+        fallback_source_filter: _MemorySource | None = None
+        if request.source_filter:
+            with contextlib.suppress(ValueError):
+                fallback_source_filter = _MemorySource(request.source_filter)
+
         results = state.vector_store.search(
             query_embedding,
             top_k=request.top_k,
-            source_filter=request.source_filter or None,
+            source_filter=fallback_source_filter,
         )
 
-        items: list[MemoryChunkItem] = [
+        fallback_items: list[MemoryChunkItem] = [
             MemoryChunkItem(
                 chunk_id=r.get("chunk_id", ""),
                 text=r.get("text", ""),
@@ -107,9 +155,9 @@ async def memory_search(
         embedder.unload()
 
         return MemorySearchResponse(
-            results=items,
+            results=fallback_items,
             query=request.query,
-            total_candidates=len(items),
+            total_candidates=len(fallback_items),
         )
 
     except Exception as exc:
@@ -268,18 +316,25 @@ async def ingest_file(
             source_file=filename,
         )
 
-    # Read file content
+    # Read file content with chunked size check to prevent memory exhaustion
     try:
-        content = await file.read()
+        chunks: list[bytes] = []
+        total_read = 0
+        while True:
+            chunk = await file.read(65536)  # 64KB chunks
+            if not chunk:
+                break
+            total_read += len(chunk)
+            if total_read > _MAX_INGEST_FILE_SIZE:
+                return IngestResponse(
+                    error=f"File too large (>{_MAX_INGEST_FILE_SIZE} bytes). Maximum: {_MAX_INGEST_FILE_SIZE} bytes",
+                    source_file=filename,
+                )
+            chunks.append(chunk)
+        content = b"".join(chunks)
     except Exception as exc:
         return IngestResponse(
             error=f"Failed to read uploaded file: {exc}",
-            source_file=filename,
-        )
-
-    if len(content) > _MAX_INGEST_FILE_SIZE:
-        return IngestResponse(
-            error=f"File too large ({len(content)} bytes). Maximum: {_MAX_INGEST_FILE_SIZE} bytes",
             source_file=filename,
         )
 

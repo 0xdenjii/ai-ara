@@ -158,7 +158,7 @@ class MoondreamModel:
                 )
                 return model, tokenizer
 
-            self._model, self._tokenizer = await asyncio.get_event_loop().run_in_executor(
+            self._model, self._tokenizer = await asyncio.get_running_loop().run_in_executor(
                 None, _load
             )
             self._loaded = True
@@ -226,7 +226,7 @@ class MoondreamModel:
             return self._model.answer_question(enc_image, "Describe this image.", self._tokenizer)  # type: ignore[no-any-return]
 
         try:
-            text = await asyncio.get_event_loop().run_in_executor(None, _infer)
+            text = await asyncio.get_running_loop().run_in_executor(None, _infer)
             elapsed = (time.monotonic() - start) * 1000
 
             return VisionResult(
@@ -261,7 +261,7 @@ class MoondreamModel:
             return self._model.answer_question(enc_image, question, self._tokenizer)  # type: ignore[no-any-return]
 
         try:
-            text = await asyncio.get_event_loop().run_in_executor(None, _infer)
+            text = await asyncio.get_running_loop().run_in_executor(None, _infer)
             elapsed = (time.monotonic() - start) * 1000
 
             return VisionResult(
@@ -306,7 +306,7 @@ class MoondreamModel:
             return self._model.answer_question(enc_image, detect_prompt, self._tokenizer)  # type: ignore[no-any-return]
 
         try:
-            text = await asyncio.get_event_loop().run_in_executor(None, _infer)
+            text = await asyncio.get_running_loop().run_in_executor(None, _infer)
             elapsed = (time.monotonic() - start) * 1000
 
             return VisionResult(

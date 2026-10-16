@@ -295,11 +295,9 @@ async def cmd_date(settings: AraSettings, date_str: str) -> int:
 
         print(f"  Synced: {date_str}")
         print(f"  Brainstorm:     {'present' if note.brainstorm else 'empty'}")
-        print(
-            f"  Ops Log:        {sum(1 for q in [note.q1, note.q2, note.q3, note.q4] if q)} quarters"
-        )
-        print(f"  Protocol tasks: {len(note.protocol_tasks)}")
-        print(f"  Total tasks:    {len(note.all_tasks)}")
+        print(f"  Ops Log:        {len(note.operational_log)} quarters")
+        print(f"  Protocol tasks: {len(note.protocol_checklist)}")
+        print(f"  Total tasks:    {len(note.tasks)}")
 
         # Force ingest this note
         if pipeline is not None:
